@@ -309,6 +309,7 @@ over real local HTTP servers (only market data is stubbed, since that needs live
 | `/status` | GET | Mode, watchlist, halted flag, next run time per scheduled job |
 | `/decisions` | GET | Recent LLM decisions (`?limit=`) |
 | `/trades` | GET | Recent trades (`?limit=`) |
+| `/poll-cycle` | POST | Manually trigger one poll cycle across the watchlist, using the real broker/LLM client (`MODE=LIVE` can place real orders here) — `?force=true` bypasses the market-hours window; refuses to run while halted |
 | `/kill-switch` | POST | Pause all scheduled jobs immediately |
 | `/resume` | POST | Resume scheduled jobs after a kill-switch |
 | `/oauth/robinhood/authorize` | GET | Start (or resume) Robinhood MCP authorization — visit in a browser; see [Going live](#going-live) Option B |

@@ -135,6 +135,7 @@ async def _poll_ticker(
         )
 
         decision, prompt, raw = await llm_client.decide(ticker, history, ticker_state)
+        logger.debug("llm decision (%s), raw_response (%s)", decision, raw)
         llm_decision = await repo.save_llm_decision(
             session,
             ticker=ticker,
@@ -224,18 +225,21 @@ async def run_poll_cycle(
     settings: Settings | None = None,
     notifier: Notifier | None = None,
     now: datetime | None = None,
+    bypass_window: bool = False,
 ) -> None:
     """One 5-minute poll across the whole watchlist (spec 3.1 + 3.2). Each ticker is
     isolated -- one ticker's failure (bad data, LLM error) must not block the rest.
     `now` is injectable for tests; real callers (the scheduler) always let it default
-    to the actual current time.
+    to the actual current time. `bypass_window` skips the market-hours check -- only
+    the on-demand /poll-cycle endpoint sets it, for manually triggering a cycle
+    outside 09:30-11:30 (e.g. to debug); the scheduled job never does.
     """
     settings = settings or get_settings()
     notifier = notifier or get_notifier()
 
     tz = ZoneInfo(settings.timezone)
     now_local = (now.astimezone(tz) if now else datetime.now(tz)).time()
-    if not _is_within_poll_window(now_local, settings):
+    if not bypass_window and not _is_within_poll_window(now_local, settings):
         logger.debug(
             "Outside the %s-%s poll window (now=%s local) -- skipping this cycle",
             settings.market_open_time,

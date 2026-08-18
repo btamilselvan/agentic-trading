@@ -102,6 +102,23 @@ async def test_run_poll_cycle_skips_entirely_outside_the_poll_window(db_session,
     assert await _bucket_count("AAPL") == 0  # never even fetched market data
 
 
+async def test_run_poll_cycle_bypass_window_runs_outside_the_poll_window(db_session, monkeypatch):
+    bar = HistoricalBar("AAPL", BUCKET_START, 100, 101, 99, 100.5, 1000)
+    _patch_market_data(monkeypatch, bar)
+    outside_window = datetime(2026, 8, 17, 20, 0, tzinfo=ZoneInfo("America/New_York"))
+    llm = FakeLLMClient(TradeDecision(decision="HOLD", confidence_score=0.2))
+
+    await scheduler.run_poll_cycle(
+        broker=DryRunBrokerClient(),
+        llm_client=llm,
+        settings=_settings(),
+        now=outside_window,
+        bypass_window=True,
+    )
+
+    assert await _bucket_count("AAPL") == 1  # ran despite being outside the window
+
+
 async def test_poll_cycle_persists_bucket_and_skips_reprocessing_same_bucket(
     db_session, monkeypatch
 ):

@@ -53,6 +53,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
 
     app.state.scheduler = scheduler
     app.state.broker = broker
+    app.state.llm_client = llm_client
     app.state.halted = False
 
     logger.info(

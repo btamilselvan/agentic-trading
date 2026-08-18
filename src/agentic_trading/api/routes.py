@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from agentic_trading.config import get_settings
 from agentic_trading.execution.broker_mcp_client import McpBrokerClient
 from agentic_trading.market_data import robinhood_client as rh_market
+from agentic_trading.scheduler import run_poll_cycle
 from agentic_trading.state.db import get_session
 from agentic_trading.state.models import LlmDecision, Trade
 
@@ -136,6 +137,30 @@ async def broker_position(ticker: str) -> dict:
         raise HTTPException(status_code=502, detail=f"Robinhood MCP call failed: {exc}") from exc
 
     return {"ticker": ticker, "open_position_quantity": quantity}
+
+
+@router.post("/poll-cycle")
+async def trigger_poll_cycle(request: Request, force: bool = False) -> dict:
+    """Manually triggers one run_poll_cycle across the whole watchlist, using the
+    same broker/llm_client instances the scheduler itself uses (app.state, wired in
+    main.py's lifespan) -- not fresh ones -- so this exercises the real pipeline
+    (MODE=LIVE really can place orders here) rather than a side simulation.
+
+    By default this still enforces the MARKET_OPEN_TIME-EVALUATION_WINDOW_END_TIME
+    poll window and does nothing outside it, same as the scheduled job; pass
+    ?force=true to bypass that for manual/debugging use. Refuses to run at all while
+    halted (see /kill-switch) -- an on-demand trigger must not be a way around a
+    halt.
+    """
+    if request.app.state.halted:
+        raise HTTPException(status_code=409, detail="Halted via kill-switch -- resume first")
+
+    await run_poll_cycle(
+        broker=request.app.state.broker,
+        llm_client=request.app.state.llm_client,
+        bypass_window=force,
+    )
+    return {"status": "completed", "watchlist": get_settings().watchlist, "forced": force}
 
 
 @router.post("/kill-switch")
