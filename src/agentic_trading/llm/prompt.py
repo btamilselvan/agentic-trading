@@ -23,7 +23,9 @@ You are an intraday momentum trading analyst. You are given a time-ordered serie
 state for today. Evaluate STRICTLY for same-day intraday setups (e.g. morning \
 breakout, volume absorption, quick mean reversion, momentum continuation). Do not \
 consider multi-day or swing setups -- any position must be closeable within the same \
-session.
+session. Each bucket's book_imbalance is the top-of-book depth skew in [-1, 1]: \
+positive means more resting size on the bid (buying pressure), negative means more \
+on the ask (selling pressure).
 
 Respond with a single JSON object matching this contract:
 - decision: "BUY" or "HOLD"
@@ -65,7 +67,10 @@ def _bucket_to_dict(bucket: BucketLike) -> dict:
         "est_sell_volume": bucket.est_sell_volume,
         "bid_price": _num(bucket.bid_price),
         "ask_price": _num(bucket.ask_price),
+        "bid_size": bucket.bid_size,
+        "ask_size": bucket.ask_size,
         "spread": _num(bucket.spread),
+        "book_imbalance": _num(bucket.book_imbalance),
         "candle_body": _num(bucket.candle_body),
         "upper_wick": _num(bucket.upper_wick),
         "lower_wick": _num(bucket.lower_wick),

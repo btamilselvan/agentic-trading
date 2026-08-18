@@ -8,7 +8,8 @@ the bar; closing near the low implies selling pressure did. This is a standard,
 well-understood approximation for OHLCV-only data.
 
 Similarly "order book depth imbalance" is approximated from the top-of-book bid/ask
-*size* only (no L2 depth feed is available from either data source).
+*size* only (no L2 depth feed is available from either data source) -- see
+`_book_imbalance`, a normalized [-1, 1] reading of which side has more resting size.
 """
 
 from __future__ import annotations
@@ -38,7 +39,10 @@ class BucketLike(Protocol):
     est_sell_volume: int
     bid_price: float | None
     ask_price: float | None
+    bid_size: int | None
+    ask_size: int | None
     spread: float | None
+    book_imbalance: float | None
     candle_body: float
     upper_wick: float
     lower_wick: float
@@ -62,6 +66,7 @@ class MetricBucket:
     bid_size: int | None
     ask_size: int | None
     spread: float | None
+    book_imbalance: float | None
     candle_body: float
     upper_wick: float
     lower_wick: float
@@ -85,6 +90,23 @@ def _candle_stats(bar: HistoricalBar) -> tuple[float, float, float]:
     upper_wick = bar.high - max(bar.open, bar.close)
     lower_wick = min(bar.open, bar.close) - bar.low
     return body, upper_wick, lower_wick
+
+
+def _book_imbalance(bid_size: int | None, ask_size: int | None) -> float | None:
+    """Top-of-book depth imbalance (spec 3.1's "order book depth imbalance"), the
+    piece of spec 3.1 that was computed (bid_size/ask_size, see quote fetch) and
+    persisted but never actually reached the LLM prompt -- see llm/prompt.py.
+
+    Normalized to [-1, 1]: positive means more resting size on the bid (buying
+    pressure at the top of book), negative means more on the ask (selling
+    pressure). None if either side's size is unavailable or both are zero.
+    """
+    if bid_size is None or ask_size is None:
+        return None
+    total = bid_size + ask_size
+    if total <= 0:
+        return None
+    return (bid_size - ask_size) / total
 
 
 def compute_rvol(bar: HistoricalBar, lookback_bars: list[HistoricalBar]) -> float | None:
@@ -113,6 +135,8 @@ def build_bucket(
     spread = None
     if quote and quote.bid_price is not None and quote.ask_price is not None:
         spread = quote.ask_price - quote.bid_price
+    bid_size = quote.bid_size if quote else None
+    ask_size = quote.ask_size if quote else None
     return MetricBucket(
         ticker=bar.symbol,
         bucket_start=bar.begins_at,
@@ -126,9 +150,10 @@ def build_bucket(
         est_sell_volume=est_sell,
         bid_price=quote.bid_price if quote else None,
         ask_price=quote.ask_price if quote else None,
-        bid_size=quote.bid_size if quote else None,
-        ask_size=quote.ask_size if quote else None,
+        bid_size=bid_size,
+        ask_size=ask_size,
         spread=spread,
+        book_imbalance=_book_imbalance(bid_size, ask_size),
         candle_body=body,
         upper_wick=upper_wick,
         lower_wick=lower_wick,

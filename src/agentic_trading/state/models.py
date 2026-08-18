@@ -78,6 +78,7 @@ class Bucket(Base):
     bid_size: Mapped[int | None] = mapped_column(nullable=True)
     ask_size: Mapped[int | None] = mapped_column(nullable=True)
     spread: Mapped[float | None] = mapped_column(Numeric(12, 4), nullable=True)
+    book_imbalance: Mapped[float | None] = mapped_column(Numeric(6, 4), nullable=True)
 
     candle_body: Mapped[float] = mapped_column(Numeric(12, 4))
     upper_wick: Mapped[float] = mapped_column(Numeric(12, 4))

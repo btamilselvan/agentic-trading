@@ -69,6 +69,47 @@ def test_no_quote_leaves_bid_ask_spread_none():
     bucket = build_bucket(bar, quote=None, lookback_bars=[])
     assert bucket.bid_price is None
     assert bucket.spread is None
+    assert bucket.book_imbalance is None
+
+
+def test_book_imbalance_positive_when_bid_size_dominates():
+    bar = _bar(datetime(2026, 8, 17, 9, 30, tzinfo=UTC), 100, 101, 99, 100, 1_000)
+    quote = Quote(
+        symbol="AAPL", bid_price=99.9, ask_price=100.1, bid_size=750, ask_size=250,
+        last_trade_price=100.0, updated_at=None,
+    )
+    bucket = build_bucket(bar, quote=quote, lookback_bars=[])
+    assert bucket.book_imbalance == 0.5  # (750-250)/1000
+
+
+def test_book_imbalance_negative_when_ask_size_dominates():
+    bar = _bar(datetime(2026, 8, 17, 9, 30, tzinfo=UTC), 100, 101, 99, 100, 1_000)
+    quote = Quote(
+        symbol="AAPL", bid_price=99.9, ask_price=100.1, bid_size=100, ask_size=300,
+        last_trade_price=100.0, updated_at=None,
+    )
+    bucket = build_bucket(bar, quote=quote, lookback_bars=[])
+    assert round(bucket.book_imbalance, 4) == -0.5  # (100-300)/400
+
+
+def test_book_imbalance_zero_when_sizes_are_balanced():
+    bar = _bar(datetime(2026, 8, 17, 9, 30, tzinfo=UTC), 100, 101, 99, 100, 1_000)
+    quote = Quote(
+        symbol="AAPL", bid_price=99.9, ask_price=100.1, bid_size=400, ask_size=400,
+        last_trade_price=100.0, updated_at=None,
+    )
+    bucket = build_bucket(bar, quote=quote, lookback_bars=[])
+    assert bucket.book_imbalance == 0.0
+
+
+def test_book_imbalance_none_when_sizes_are_both_zero():
+    bar = _bar(datetime(2026, 8, 17, 9, 30, tzinfo=UTC), 100, 101, 99, 100, 1_000)
+    quote = Quote(
+        symbol="AAPL", bid_price=99.9, ask_price=100.1, bid_size=0, ask_size=0,
+        last_trade_price=100.0, updated_at=None,
+    )
+    bucket = build_bucket(bar, quote=quote, lookback_bars=[])
+    assert bucket.book_imbalance is None
 
 
 def test_rvol_none_without_lookback_history():

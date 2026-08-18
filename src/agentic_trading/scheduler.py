@@ -114,6 +114,7 @@ async def _poll_ticker(
             bid_size=bucket_data.bid_size,
             ask_size=bucket_data.ask_size,
             spread=bucket_data.spread,
+            book_imbalance=bucket_data.book_imbalance,
             candle_body=bucket_data.candle_body,
             upper_wick=bucket_data.upper_wick,
             lower_wick=bucket_data.lower_wick,

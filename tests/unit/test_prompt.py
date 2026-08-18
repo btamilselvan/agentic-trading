@@ -6,7 +6,7 @@ from decimal import Decimal
 from agentic_trading.llm.prompt import build_prompt
 from agentic_trading.llm.schema import TickerState
 from agentic_trading.market_data.bucket_builder import build_bucket
-from agentic_trading.market_data.robinhood_client import HistoricalBar
+from agentic_trading.market_data.robinhood_client import HistoricalBar, Quote
 
 
 def test_prompt_contains_full_bucket_history_and_ticker_state():
@@ -31,6 +31,30 @@ def test_prompt_contains_full_bucket_history_and_ticker_state():
         "open_positions": 0,
         "realized_pnl": 12.5,
     }
+
+
+def test_prompt_includes_book_depth_fields():
+    # Regression test: bid_size/ask_size/book_imbalance (spec 3.1's "order book depth
+    # imbalance") were computed and persisted but never reached the LLM payload
+    # before _bucket_to_dict included them -- guard against that gap recurring.
+    t0 = datetime(2026, 8, 17, 9, 30, tzinfo=UTC)
+    quote = Quote(
+        symbol="AAPL", bid_price=99.9, ask_price=100.1, bid_size=750, ask_size=250,
+        last_trade_price=100.0, updated_at=None,
+    )
+    bucket = build_bucket(
+        HistoricalBar("AAPL", t0, 100, 101, 99, 100.5, 1000), quote=quote, lookback_bars=[]
+    )
+    state = TickerState(completed_trades_today=0, open_positions=0, realized_pnl_today=0.0)
+
+    prompt = build_prompt("AAPL", [bucket], state)
+
+    payload = json.loads(prompt.split("Input:\n", 1)[1])
+    bucket_payload = payload["buckets"][0]
+    assert bucket_payload["bid_size"] == 750
+    assert bucket_payload["ask_size"] == 250
+    assert bucket_payload["book_imbalance"] == 0.5
+    assert "book_imbalance" in prompt.split("Input:\n", 1)[0]  # mentioned in instructions
 
 
 def test_prompt_serializes_when_lookback_buckets_carry_decimal_fields():
