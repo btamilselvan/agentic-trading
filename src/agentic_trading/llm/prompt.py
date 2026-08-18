@@ -8,10 +8,14 @@ setups (breakout, volume absorption, mean reversion, momentum continuation).
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Sequence
+from decimal import Decimal
 
 from agentic_trading.llm.schema import TickerState
 from agentic_trading.market_data.bucket_builder import BucketLike
+
+logger = logging.getLogger(__name__)
 
 _SYSTEM_INSTRUCTIONS = """\
 You are an intraday momentum trading analyst. You are given a time-ordered series of \
@@ -37,23 +41,35 @@ already has an open position or has hit its trade cap for the day, respond HOLD.
 """
 
 
+def _num(value: float | Decimal | None) -> float | None:
+    """Normalize a numeric bucket field to float.
+
+    Bucket rows read back from the DB come back as Decimal (state/models.py's
+    columns are SQLAlchemy Numeric, despite the `Mapped[float]` type hint), while
+    a freshly-built MetricBucket for the current bucket holds plain floats. Mixing
+    the two in one payload made json.dumps below raise "Object of type Decimal is
+    not JSON serializable" the moment lookback history was involved.
+    """
+    return None if value is None else float(value)
+
+
 def _bucket_to_dict(bucket: BucketLike) -> dict:
     return {
         "bucket_start": bucket.bucket_start.isoformat(),
-        "open": bucket.open,
-        "high": bucket.high,
-        "low": bucket.low,
-        "close": bucket.close,
+        "open": _num(bucket.open),
+        "high": _num(bucket.high),
+        "low": _num(bucket.low),
+        "close": _num(bucket.close),
         "volume": bucket.volume,
         "est_buy_volume": bucket.est_buy_volume,
         "est_sell_volume": bucket.est_sell_volume,
-        "bid_price": bucket.bid_price,
-        "ask_price": bucket.ask_price,
-        "spread": bucket.spread,
-        "candle_body": bucket.candle_body,
-        "upper_wick": bucket.upper_wick,
-        "lower_wick": bucket.lower_wick,
-        "rvol": bucket.rvol,
+        "bid_price": _num(bucket.bid_price),
+        "ask_price": _num(bucket.ask_price),
+        "spread": _num(bucket.spread),
+        "candle_body": _num(bucket.candle_body),
+        "upper_wick": _num(bucket.upper_wick),
+        "lower_wick": _num(bucket.lower_wick),
+        "rvol": _num(bucket.rvol),
     }
 
 
@@ -69,4 +85,5 @@ def build_prompt(
             "realized_pnl": ticker_state.realized_pnl_today,
         },
     }
+    logger.debug("payload %s", payload)
     return f"{_SYSTEM_INSTRUCTIONS}\nInput:\n{json.dumps(payload, indent=2)}"
