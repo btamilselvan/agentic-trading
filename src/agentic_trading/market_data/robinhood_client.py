@@ -8,6 +8,7 @@ market-data and order-execution be swapped independently later.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -18,6 +19,7 @@ from agentic_trading.config import get_settings
 
 _logged_in = False
 
+logger = logging.getLogger(__name__)
 
 def ensure_login() -> None:
     """Log in once per process, reusing a cached session pickle if present.
@@ -88,6 +90,7 @@ def get_5min_historicals(
     """
     ensure_login()
     raw = rh.stocks.get_stock_historicals(symbol, interval="5minute", span=span, bounds=bounds)
+    logger.debug("historicals data for span %s and bounds %s, data: %s", span, bounds, raw)
     bars: list[HistoricalBar] = []
     for row in raw or []:
         if not row:

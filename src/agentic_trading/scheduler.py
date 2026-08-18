@@ -70,12 +70,20 @@ async def _poll_ticker(
     # event loop this scheduler (and the whole FastAPI app) shares. Left unwrapped,
     # a slow call (or an interactive MFA prompt on first login) freezes everything,
     # including subsequent scheduled poll cycles.
+
+    # get 5 mins bars for today (begin time, open/close price, high/low and volume)
     bars = await asyncio.to_thread(rh.get_5min_historicals, ticker, span="day")
     if not bars:
         return
     latest_bar = bars[-1]
+
+    #get current quote (bid/ask price + size)
     quote = await asyncio.to_thread(rh.get_quote, ticker)
+
+    #get the bars for the last one week
     lookback = await _get_lookback_bars(ticker)
+
+    #current metric bucket with RVOL
     bucket_data = build_bucket(latest_bar, quote, lookback)
     today = bucket_data.bucket_start.date()
 
@@ -134,6 +142,7 @@ async def _poll_ticker(
             realized_pnl_today=float(daily_state.realized_pnl or 0),
         )
 
+        # Get insights from LLM using today's Metrics
         decision, prompt, raw = await llm_client.decide(ticker, history, ticker_state)
         logger.debug("llm decision (%s), raw_response (%s)", decision, raw)
         llm_decision = await repo.save_llm_decision(
