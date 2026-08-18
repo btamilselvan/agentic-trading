@@ -1,0 +1,26 @@
+# Supabase (Postgres) is remote/hosted, so it is not part of this compose file --
+# point DATABASE_URL in .env at your Supabase connection string.
+services:
+  app:
+    build: .
+    env_file: .env
+    environment:
+      # Overrides .env's OLLAMA_HOST=http://localhost:11434 -- inside this network,
+      # "localhost" is the app container itself, not the ollama service.
+      OLLAMA_HOST: http://ollama:11434
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./.secrets:/app/.secrets
+    depends_on:
+      - ollama
+
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+
+volumes:
+  ollama_data:
