@@ -5,6 +5,7 @@ from agentic_trading.market_data.bucket_builder import (
     build_market_context,
     compute_rvol,
     compute_vwap,
+    detect_vwap_cross,
     find_prior_close,
     pct_change,
 )
@@ -244,3 +245,30 @@ def test_build_market_context_computes_change_vwap_deviation_and_range():
     vwap = compute_vwap(bars_today)
     assert round(ctx.vwap_deviation_pct, 4) == round((408 - vwap) / vwap * 100, 4)
     assert round(ctx.range_pct, 4) == round((410 - 402) / 404 * 100, 4)  # day high/low vs day open
+
+
+def test_detect_vwap_cross_up_on_reclaim_from_below():
+    assert detect_vwap_cross(prev_close=99.0, prev_vwap=100.0, close=101.0, vwap=100.5) == "up"
+
+
+def test_detect_vwap_cross_down_on_breakdown_from_above():
+    assert detect_vwap_cross(prev_close=101.0, prev_vwap=100.0, close=99.0, vwap=100.5) == "down"
+
+
+def test_detect_vwap_cross_none_when_staying_on_the_same_side():
+    # stayed above both times
+    assert detect_vwap_cross(prev_close=101.0, prev_vwap=100.0, close=102.0, vwap=100.5) is None
+    # stayed below both times
+    assert detect_vwap_cross(prev_close=99.0, prev_vwap=100.0, close=98.0, vwap=100.5) is None
+
+
+def test_detect_vwap_cross_none_at_exact_vwap_boundary():
+    # close == vwap is treated as "not above" on both sides -- no crossing recorded
+    assert detect_vwap_cross(prev_close=100.0, prev_vwap=100.0, close=100.5, vwap=100.5) is None
+
+
+def test_detect_vwap_cross_none_when_any_input_missing():
+    assert detect_vwap_cross(None, 100.0, 101.0, 100.5) is None
+    assert detect_vwap_cross(99.0, None, 101.0, 100.5) is None
+    assert detect_vwap_cross(99.0, 100.0, None, 100.5) is None
+    assert detect_vwap_cross(99.0, 100.0, 101.0, None) is None

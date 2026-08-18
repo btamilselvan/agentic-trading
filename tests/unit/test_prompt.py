@@ -148,6 +148,64 @@ def test_prompt_omits_market_context_when_no_benchmark_configured():
     assert "market_context" not in payload
 
 
+def test_prompt_first_bucket_has_no_sequential_signals():
+    # Regression test for gap 5: nothing to compare the first bucket of the day
+    # against -- close_change_pct/volume_change_pct/vwap_cross must all be null
+    # rather than crash or compare against garbage.
+    t0 = datetime(2026, 8, 17, 9, 30, tzinfo=UTC)
+    bucket = build_bucket(
+        HistoricalBar("AAPL", t0, 100, 101, 99, 100.5, 1_000), quote=None, lookback_bars=[]
+    )
+    state = TickerState(completed_trades_today=0, open_positions=0, realized_pnl_today=0.0)
+
+    prompt = build_prompt("AAPL", [bucket], state)
+
+    payload = json.loads(prompt.split("Input:\n", 1)[1])
+    first = payload["buckets"][0]
+    assert first["close_change_pct"] is None
+    assert first["volume_change_pct"] is None
+    assert first["vwap_cross"] is None
+
+
+def test_prompt_computes_close_and_volume_change_between_consecutive_buckets():
+    t0 = datetime(2026, 8, 17, 9, 30, tzinfo=UTC)
+    t1 = t0.replace(minute=35)
+    bar0 = HistoricalBar("AAPL", t0, 100, 101, 99, 100.0, 1_000)
+    bar1 = HistoricalBar("AAPL", t1, 100, 104, 100, 103.0, 1_500)
+    bucket0 = build_bucket(bar0, quote=None, lookback_bars=[], today_bars=[bar0])
+    bucket1 = build_bucket(bar1, quote=None, lookback_bars=[], today_bars=[bar0, bar1])
+    state = TickerState(completed_trades_today=0, open_positions=0, realized_pnl_today=0.0)
+
+    prompt = build_prompt("AAPL", [bucket0, bucket1], state)
+
+    payload = json.loads(prompt.split("Input:\n", 1)[1])
+    second = payload["buckets"][1]
+    assert round(second["close_change_pct"], 4) == round((103.0 - 100.0) / 100.0 * 100, 4)
+    assert round(second["volume_change_pct"], 4) == round((1_500 - 1_000) / 1_000 * 100, 4)
+    assert "close_change_pct" in prompt.split("Input:\n", 1)[0]  # mentioned in instructions
+    assert "vwap_cross" in prompt.split("Input:\n", 1)[0]
+
+
+def test_prompt_flags_vwap_cross_on_reclaim():
+    # Bucket 0 closes below its own point-in-time VWAP; bucket 1 closes above its
+    # (cumulative, now larger) VWAP -- a reclaim, so vwap_cross == "up".
+    t0 = datetime(2026, 8, 17, 9, 30, tzinfo=UTC)
+    t1 = t0.replace(minute=35)
+    bar0 = HistoricalBar("AAPL", t0, 100, 101, 95, 96.0, 1_000)  # typical ~97.33, closes below
+    bar1 = HistoricalBar("AAPL", t1, 96, 110, 96, 109.0, 1_000)  # closes well above VWAP now
+    bucket0 = build_bucket(bar0, quote=None, lookback_bars=[], today_bars=[bar0])
+    bucket1 = build_bucket(bar1, quote=None, lookback_bars=[], today_bars=[bar0, bar1])
+    assert bucket0.close < bucket0.vwap  # sanity-check the fixture
+    assert bucket1.close > bucket1.vwap
+    state = TickerState(completed_trades_today=0, open_positions=0, realized_pnl_today=0.0)
+
+    prompt = build_prompt("AAPL", [bucket0, bucket1], state)
+
+    payload = json.loads(prompt.split("Input:\n", 1)[1])
+    assert payload["buckets"][0]["vwap_cross"] is None  # no prior bucket
+    assert payload["buckets"][1]["vwap_cross"] == "up"
+
+
 def test_prompt_serializes_when_lookback_buckets_carry_decimal_fields():
     # Regression test: lookback buckets read back from the DB come back as Decimal
     # (state/models.py's Bucket columns are SQLAlchemy Numeric, despite the

@@ -13,7 +13,7 @@ from collections.abc import Sequence
 from decimal import Decimal
 
 from agentic_trading.llm.schema import TickerState
-from agentic_trading.market_data.bucket_builder import BucketLike, pct_change
+from agentic_trading.market_data.bucket_builder import BucketLike, detect_vwap_cross, pct_change
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +38,16 @@ above, but for the whole market; range_pct is today's high-low range as a % of \
 open, a volatility proxy). Weigh the ticker's own setup against this: a breakout \
 aligned with a trending market (same direction, comparable magnitude) is more \
 reliable than the same-looking breakout while the broad market is flat or moving \
-the other way -- treat market_context as a modifier on confidence, not a veto.
+the other way -- treat market_context as a modifier on confidence, not a veto. \
+Each bucket's close_change_pct and volume_change_pct are versus the immediately \
+preceding bucket (null on the first bucket, since there's nothing prior to compare \
+against): a string of positive close_change_pct with rising volume_change_pct is \
+the clearest signature of momentum continuation, while volume fading as price \
+keeps climbing is a warning sign of exhaustion. vwap_cross is "up" on the bucket \
+where price reclaims its session VWAP from below, "down" where it breaks below \
+from above, and null otherwise -- a reclaim aligned with volume is a stronger \
+breakout signal than price merely drifting above VWAP without ever having crossed \
+it intraday.
 
 Respond with a single JSON object matching this contract:
 - decision: "BUY" or "HOLD"
@@ -68,9 +77,11 @@ def _num(value: float | Decimal | None) -> float | None:
     return None if value is None else float(value)
 
 
-def _bucket_to_dict(bucket: BucketLike) -> dict:
+def _bucket_to_dict(bucket: BucketLike, previous: BucketLike | None) -> dict:
     close = _num(bucket.close)
     vwap = _num(bucket.vwap)
+    prev_close = _num(previous.close) if previous else None
+    prev_vwap = _num(previous.vwap) if previous else None
     return {
         "bucket_start": bucket.bucket_start.isoformat(),
         "open": _num(bucket.open),
@@ -92,6 +103,12 @@ def _bucket_to_dict(bucket: BucketLike) -> dict:
         "rvol": _num(bucket.rvol),
         "vwap": vwap,
         "vwap_deviation_pct": pct_change(close, vwap),
+        # Sequential signals -- vs. the immediately preceding bucket, not raw levels
+        # -- so a small local model isn't left to infer momentum/volume trend or a
+        # VWAP crossing itself by diffing raw numbers across the bucket array.
+        "close_change_pct": pct_change(close, prev_close),
+        "volume_change_pct": pct_change(bucket.volume, previous.volume if previous else None),
+        "vwap_cross": detect_vwap_cross(prev_close, prev_vwap, close, vwap),
     }
 
 
@@ -100,9 +117,14 @@ def build_prompt(
 ) -> str:
     today_open = _num(bucket_history[0].open) if bucket_history else None
     prior_close = ticker_state.prior_close
+    buckets_payload = []
+    previous: BucketLike | None = None
+    for bucket in bucket_history:
+        buckets_payload.append(_bucket_to_dict(bucket, previous))
+        previous = bucket
     payload = {
         "ticker": ticker,
-        "buckets": [_bucket_to_dict(b) for b in bucket_history],
+        "buckets": buckets_payload,
         "ticker_state_today": {
             "completed_trades": ticker_state.completed_trades_today,
             "open_positions": ticker_state.open_positions,

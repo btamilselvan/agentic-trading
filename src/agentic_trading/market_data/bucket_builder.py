@@ -23,6 +23,12 @@ default, see config.market_benchmark_ticker) using the same bar-based machinery 
 everything else here. No VIX: Robinhood/robin_stocks don't reliably expose index
 quotes, so `range_pct` (today's benchmark high-low range as a % of its open) stands
 in as a realized-volatility proxy instead.
+
+`detect_vwap_cross` labels the specific bucket-to-bucket transition where price
+crosses its own session VWAP (a "VWAP reclaim" or "VWAP breakdown") -- llm/prompt.py
+uses it, plus per-bucket close_change_pct/volume_change_pct, so a small local model
+doesn't have to infer momentum/volume trend or a crossing event by eyeballing a raw
+series of buckets itself.
 """
 
 from __future__ import annotations
@@ -262,3 +268,23 @@ def build_market_context(
         vwap_deviation_pct=pct_change(latest.close, vwap),
         range_pct=(day_high - day_low) / day_open * 100 if day_open else None,
     )
+
+
+def detect_vwap_cross(
+    prev_close: float | None,
+    prev_vwap: float | None,
+    close: float | None,
+    vwap: float | None,
+) -> str | None:
+    """"up" if the previous bucket closed at/below its own session VWAP and this
+    bucket closed above (a VWAP reclaim); "down" for the reverse (a VWAP breakdown);
+    None if there's no crossing, no prior bucket to compare against, or either
+    side's VWAP/close is unavailable.
+    """
+    if None in (prev_close, prev_vwap, close, vwap):
+        return None
+    was_above = prev_close > prev_vwap
+    is_above = close > vwap
+    if was_above == is_above:
+        return None
+    return "up" if is_above else "down"
