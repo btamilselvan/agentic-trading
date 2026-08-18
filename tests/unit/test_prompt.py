@@ -30,6 +30,9 @@ def test_prompt_contains_full_bucket_history_and_ticker_state():
         "completed_trades": 1,
         "open_positions": 0,
         "realized_pnl": 12.5,
+        "prior_close": None,
+        "today_open": 100.0,
+        "gap_pct": None,
     }
 
 
@@ -55,6 +58,39 @@ def test_prompt_includes_book_depth_fields():
     assert bucket_payload["ask_size"] == 250
     assert bucket_payload["book_imbalance"] == 0.5
     assert "book_imbalance" in prompt.split("Input:\n", 1)[0]  # mentioned in instructions
+
+
+def test_prompt_includes_gap_context_from_prior_close():
+    # Regression test for gap 2: with only today's own bars in view, the LLM can't
+    # tell if today opened with a gap -- prior_close/today_open/gap_pct fix that.
+    t0 = datetime(2026, 8, 17, 9, 30, tzinfo=UTC)
+    bucket = build_bucket(
+        HistoricalBar("AAPL", t0, 103, 104, 102, 103.5, 1000), quote=None, lookback_bars=[]
+    )
+    state = TickerState(
+        completed_trades_today=0, open_positions=0, realized_pnl_today=0.0, prior_close=100.0
+    )
+
+    prompt = build_prompt("AAPL", [bucket], state)
+
+    payload = json.loads(prompt.split("Input:\n", 1)[1])
+    ticker_state_payload = payload["ticker_state_today"]
+    assert ticker_state_payload["prior_close"] == 100.0
+    assert ticker_state_payload["today_open"] == 103.0
+    assert round(ticker_state_payload["gap_pct"], 2) == 3.0  # (103-100)/100 * 100
+    assert "gap_pct" in prompt.split("Input:\n", 1)[0]  # mentioned in instructions
+
+
+def test_prompt_gap_pct_is_none_without_prior_close_or_buckets():
+    state = TickerState(completed_trades_today=0, open_positions=0, realized_pnl_today=0.0)
+
+    prompt = build_prompt("AAPL", [], state)
+
+    payload = json.loads(prompt.split("Input:\n", 1)[1])
+    ticker_state_payload = payload["ticker_state_today"]
+    assert ticker_state_payload["prior_close"] is None
+    assert ticker_state_payload["today_open"] is None
+    assert ticker_state_payload["gap_pct"] is None
 
 
 def test_prompt_serializes_when_lookback_buckets_carry_decimal_fields():

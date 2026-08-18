@@ -127,6 +127,19 @@ def compute_rvol(bar: HistoricalBar, lookback_bars: list[HistoricalBar]) -> floa
     return bar.volume / baseline
 
 
+def find_prior_close(bar: HistoricalBar, lookback_bars: list[HistoricalBar]) -> float | None:
+    """The most recent prior trading day's closing price, from `lookback_bars` (the
+    same week of 5-min history already fetched for the RVOL baseline -- no extra API
+    call needed). Lets the LLM detect a gap-up/gap-down open, one of the four named
+    intraday setups (spec 3.2, "morning breakout") that's otherwise invisible when
+    only today's own bars are in view. None if there's no prior-day history yet.
+    """
+    prior_day_bars = [b for b in lookback_bars if b.begins_at.date() < bar.begins_at.date()]
+    if not prior_day_bars:
+        return None
+    return max(prior_day_bars, key=lambda b: b.begins_at).close
+
+
 def build_bucket(
     bar: HistoricalBar, quote: Quote | None, lookback_bars: list[HistoricalBar]
 ) -> MetricBucket:

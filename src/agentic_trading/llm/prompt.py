@@ -25,7 +25,10 @@ breakout, volume absorption, quick mean reversion, momentum continuation). Do no
 consider multi-day or swing setups -- any position must be closeable within the same \
 session. Each bucket's book_imbalance is the top-of-book depth skew in [-1, 1]: \
 positive means more resting size on the bid (buying pressure), negative means more \
-on the ask (selling pressure).
+on the ask (selling pressure). ticker_state_today.gap_pct is today's open versus the \
+prior session's close (positive = gapped up, negative = gapped down, null = no prior \
+close available yet) -- a large gap is a precondition for a genuine "morning \
+breakout" setup, as opposed to ordinary intraday drift.
 
 Respond with a single JSON object matching this contract:
 - decision: "BUY" or "HOLD"
@@ -78,9 +81,21 @@ def _bucket_to_dict(bucket: BucketLike) -> dict:
     }
 
 
+def _gap_pct(today_open: float | None, prior_close: float | None) -> float | None:
+    """Today's opening gap vs. the prior session's close, as a percentage. Computed
+    here (not left for the LLM to derive from raw numbers) so a small local model
+    doesn't have to do the arithmetic itself -- see gap 5 (computed indicators).
+    """
+    if today_open is None or prior_close is None or prior_close == 0:
+        return None
+    return (today_open - prior_close) / prior_close * 100
+
+
 def build_prompt(
     ticker: str, bucket_history: Sequence[BucketLike], ticker_state: TickerState
 ) -> str:
+    today_open = _num(bucket_history[0].open) if bucket_history else None
+    prior_close = ticker_state.prior_close
     payload = {
         "ticker": ticker,
         "buckets": [_bucket_to_dict(b) for b in bucket_history],
@@ -88,6 +103,9 @@ def build_prompt(
             "completed_trades": ticker_state.completed_trades_today,
             "open_positions": ticker_state.open_positions,
             "realized_pnl": ticker_state.realized_pnl_today,
+            "prior_close": prior_close,
+            "today_open": today_open,
+            "gap_pct": _gap_pct(today_open, prior_close),
         },
     }
     logger.debug("payload %s", payload)

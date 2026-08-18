@@ -15,6 +15,7 @@ class TickerState:
     completed_trades_today: int
     open_positions: int
     realized_pnl_today: float
+    prior_close: float | None = None
 
 
 class TradeDecision(BaseModel):

@@ -1,6 +1,6 @@
 from datetime import UTC, datetime, timedelta
 
-from agentic_trading.market_data.bucket_builder import build_bucket, compute_rvol
+from agentic_trading.market_data.bucket_builder import build_bucket, compute_rvol, find_prior_close
 from agentic_trading.market_data.robinhood_client import HistoricalBar, Quote
 
 
@@ -135,3 +135,30 @@ def test_rvol_none_when_baseline_is_zero():
     bar = _bar(today, 100, 101, 99, 100, 3_000)
     lookback = [_bar(today - timedelta(days=1), 0, 0, 0, 0, 0)]
     assert compute_rvol(bar, lookback) is None
+
+
+def test_find_prior_close_none_without_lookback_history():
+    bar = _bar(datetime(2026, 8, 17, 9, 30, tzinfo=UTC), 100, 101, 99, 100, 1_000)
+    assert find_prior_close(bar, lookback_bars=[]) is None
+
+
+def test_find_prior_close_ignores_same_day_bars():
+    today = datetime(2026, 8, 17, 9, 30, tzinfo=UTC)
+    bar = _bar(today, 100, 101, 99, 100, 1_000)
+    # only earlier bars from today itself -- not a "prior" day
+    lookback = [_bar(today - timedelta(minutes=25), 0, 0, 0, 42, 1)]
+    assert find_prior_close(bar, lookback) is None
+
+
+def test_find_prior_close_picks_the_last_bar_of_the_most_recent_prior_day():
+    today = datetime(2026, 8, 17, 9, 30, tzinfo=UTC)
+    bar = _bar(today, 100, 101, 99, 100, 1_000)
+    lookback = [
+        # two days ago -- should be ignored in favor of yesterday
+        _bar(today - timedelta(days=2, hours=6), 0, 0, 0, 88, 1),
+        # yesterday, earlier in the session -- not the last bar of that day
+        _bar(today - timedelta(days=1, hours=6), 0, 0, 0, 95, 1),
+        # yesterday's actual last bar (closest to market close)
+        _bar(today - timedelta(days=1, hours=1), 0, 0, 0, 97.5, 1),
+    ]
+    assert find_prior_close(bar, lookback) == 97.5

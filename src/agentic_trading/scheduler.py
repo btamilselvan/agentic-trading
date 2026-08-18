@@ -29,7 +29,7 @@ from agentic_trading.execution.guardrails import check_daily_trade_cap, check_po
 from agentic_trading.llm.base import LLMClient
 from agentic_trading.llm.schema import TickerState
 from agentic_trading.market_data import robinhood_client as rh
-from agentic_trading.market_data.bucket_builder import build_bucket
+from agentic_trading.market_data.bucket_builder import build_bucket, find_prior_close
 from agentic_trading.state import repository as repo
 from agentic_trading.state.db import session_scope
 from agentic_trading.state.models import TradingModeEnum
@@ -141,6 +141,7 @@ async def _poll_ticker(
             completed_trades_today=daily_state.completed_trades_count,
             open_positions=daily_state.open_positions_count,
             realized_pnl_today=float(daily_state.realized_pnl or 0),
+            prior_close=find_prior_close(latest_bar, lookback),
         )
 
         # Get insights from LLM using today's Metrics
