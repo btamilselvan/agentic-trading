@@ -1,6 +1,11 @@
 from datetime import UTC, datetime, timedelta
 
-from agentic_trading.market_data.bucket_builder import build_bucket, compute_rvol, find_prior_close
+from agentic_trading.market_data.bucket_builder import (
+    build_bucket,
+    compute_rvol,
+    compute_vwap,
+    find_prior_close,
+)
 from agentic_trading.market_data.robinhood_client import HistoricalBar, Quote
 
 
@@ -162,3 +167,40 @@ def test_find_prior_close_picks_the_last_bar_of_the_most_recent_prior_day():
         _bar(today - timedelta(days=1, hours=1), 0, 0, 0, 97.5, 1),
     ]
     assert find_prior_close(bar, lookback) == 97.5
+
+
+def test_compute_vwap_none_without_any_volume():
+    bar = _bar(datetime(2026, 8, 17, 9, 30, tzinfo=UTC), 100, 101, 99, 100, 0)
+    assert compute_vwap([bar]) is None
+
+
+def test_compute_vwap_single_bar_is_its_own_typical_price():
+    bar = _bar(datetime(2026, 8, 17, 9, 30, tzinfo=UTC), 100, 106, 98, 103, 1_000)
+    # typical price = (high + low + close) / 3
+    assert compute_vwap([bar]) == (106 + 98 + 103) / 3
+
+
+def test_compute_vwap_accumulates_volume_weighted_across_bars():
+    t0 = datetime(2026, 8, 17, 9, 30, tzinfo=UTC)
+    bars = [
+        _bar(t0, 100, 102, 98, 100, 1_000),  # typical = 100, value = 100_000
+        # typical = 102, value = 306_000
+        _bar(t0 + timedelta(minutes=5), 100, 104, 100, 102, 3_000),
+    ]
+    # vwap = (100_000 + 306_000) / (1_000 + 3_000) = 101.5
+    assert compute_vwap(bars) == 101.5
+
+
+def test_build_bucket_defaults_vwap_to_single_bar_when_today_bars_omitted():
+    bar = _bar(datetime(2026, 8, 17, 9, 30, tzinfo=UTC), 100, 106, 98, 103, 1_000)
+    bucket = build_bucket(bar, quote=None, lookback_bars=[])
+    assert bucket.vwap == (106 + 98 + 103) / 3
+
+
+def test_build_bucket_uses_today_bars_for_vwap_when_provided():
+    t0 = datetime(2026, 8, 17, 9, 30, tzinfo=UTC)
+    t1 = t0 + timedelta(minutes=5)
+    bar0 = _bar(t0, 100, 102, 98, 100, 1_000)
+    bar1 = _bar(t1, 100, 104, 100, 102, 3_000)
+    bucket = build_bucket(bar1, quote=None, lookback_bars=[], today_bars=[bar0, bar1])
+    assert bucket.vwap == 101.5  # same accumulation as test_compute_vwap_accumulates_...

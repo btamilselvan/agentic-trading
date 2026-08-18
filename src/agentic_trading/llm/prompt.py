@@ -28,7 +28,11 @@ positive means more resting size on the bid (buying pressure), negative means mo
 on the ask (selling pressure). ticker_state_today.gap_pct is today's open versus the \
 prior session's close (positive = gapped up, negative = gapped down, null = no prior \
 close available yet) -- a large gap is a precondition for a genuine "morning \
-breakout" setup, as opposed to ordinary intraday drift.
+breakout" setup, as opposed to ordinary intraday drift. Each bucket's \
+vwap_deviation_pct is that bucket's close versus the session VWAP so far: \
+sustained positive readings with rising volume support momentum continuation or a \
+breakout holding; a move back toward/through zero suggests the move is fading or \
+being rejected.
 
 Respond with a single JSON object matching this contract:
 - decision: "BUY" or "HOLD"
@@ -58,13 +62,25 @@ def _num(value: float | Decimal | None) -> float | None:
     return None if value is None else float(value)
 
 
+def _pct_deviation(value: float | None, reference: float | None) -> float | None:
+    """`value` vs. `reference` as a percentage -- shared by gap_pct (today_open vs.
+    prior_close) and vwap_deviation_pct (close vs. vwap) so a small local model
+    never has to do this arithmetic itself (see gap 5: computed indicators).
+    """
+    if value is None or reference is None or reference == 0:
+        return None
+    return (value - reference) / reference * 100
+
+
 def _bucket_to_dict(bucket: BucketLike) -> dict:
+    close = _num(bucket.close)
+    vwap = _num(bucket.vwap)
     return {
         "bucket_start": bucket.bucket_start.isoformat(),
         "open": _num(bucket.open),
         "high": _num(bucket.high),
         "low": _num(bucket.low),
-        "close": _num(bucket.close),
+        "close": close,
         "volume": bucket.volume,
         "est_buy_volume": bucket.est_buy_volume,
         "est_sell_volume": bucket.est_sell_volume,
@@ -78,17 +94,9 @@ def _bucket_to_dict(bucket: BucketLike) -> dict:
         "upper_wick": _num(bucket.upper_wick),
         "lower_wick": _num(bucket.lower_wick),
         "rvol": _num(bucket.rvol),
+        "vwap": vwap,
+        "vwap_deviation_pct": _pct_deviation(close, vwap),
     }
-
-
-def _gap_pct(today_open: float | None, prior_close: float | None) -> float | None:
-    """Today's opening gap vs. the prior session's close, as a percentage. Computed
-    here (not left for the LLM to derive from raw numbers) so a small local model
-    doesn't have to do the arithmetic itself -- see gap 5 (computed indicators).
-    """
-    if today_open is None or prior_close is None or prior_close == 0:
-        return None
-    return (today_open - prior_close) / prior_close * 100
 
 
 def build_prompt(
@@ -105,7 +113,7 @@ def build_prompt(
             "realized_pnl": ticker_state.realized_pnl_today,
             "prior_close": prior_close,
             "today_open": today_open,
-            "gap_pct": _gap_pct(today_open, prior_close),
+            "gap_pct": _pct_deviation(today_open, prior_close),
         },
     }
     logger.debug("payload %s", payload)

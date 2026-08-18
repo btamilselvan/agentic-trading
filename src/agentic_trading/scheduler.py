@@ -83,8 +83,9 @@ async def _poll_ticker(
     #get the bars for the last one week
     lookback = await _get_lookback_bars(ticker)
 
-    #current metric bucket with RVOL
-    bucket_data = build_bucket(latest_bar, quote, lookback)
+    #current metric bucket with RVOL + session VWAP (today_bars=bars gives VWAP the
+    #full open-through-now series it needs to accumulate correctly)
+    bucket_data = build_bucket(latest_bar, quote, lookback, today_bars=bars)
     today = bucket_data.bucket_start.date()
 
     rvol_pct = f"{bucket_data.rvol * 100:.2f}%" if bucket_data.rvol is not None else "n/a"
@@ -119,6 +120,7 @@ async def _poll_ticker(
             upper_wick=bucket_data.upper_wick,
             lower_wick=bucket_data.lower_wick,
             rvol=bucket_data.rvol,
+            vwap=bucket_data.vwap,
         )
 
         daily_state = await repo.get_or_create_daily_state(session, ticker, today)

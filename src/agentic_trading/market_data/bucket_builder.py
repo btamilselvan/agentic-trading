@@ -10,6 +10,11 @@ well-understood approximation for OHLCV-only data.
 Similarly "order book depth imbalance" is approximated from the top-of-book bid/ask
 *size* only (no L2 depth feed is available from either data source) -- see
 `_book_imbalance`, a normalized [-1, 1] reading of which side has more resting size.
+
+VWAP is likewise a bar-based approximation (typical price = (H+L+C)/3 per bar,
+volume-weighted across the session) rather than computed from a real trade tape --
+see `compute_vwap`. This is the standard approach when only OHLCV bars are
+available and is what most retail charting tools compute anyway.
 """
 
 from __future__ import annotations
@@ -47,6 +52,7 @@ class BucketLike(Protocol):
     upper_wick: float
     lower_wick: float
     rvol: float | None
+    vwap: float | None
 
 
 @dataclass(frozen=True)
@@ -71,6 +77,7 @@ class MetricBucket:
     upper_wick: float
     lower_wick: float
     rvol: float | None
+    vwap: float | None
 
 
 def _estimate_buy_sell_volume(bar: HistoricalBar) -> tuple[int, int]:
@@ -140,9 +147,34 @@ def find_prior_close(bar: HistoricalBar, lookback_bars: list[HistoricalBar]) -> 
     return max(prior_day_bars, key=lambda b: b.begins_at).close
 
 
+def compute_vwap(bars_today: list[HistoricalBar]) -> float | None:
+    """Session VWAP as of the most recent bar in `bars_today` (today's 5-min bars
+    from market open through now, inclusive): cumulative(typical_price * volume) /
+    cumulative(volume), where typical_price = (high + low + close) / 3 per bar. The
+    standard intraday momentum reference line -- price above VWAP with volume
+    confirms buying pressure, below confirms selling pressure -- and one most
+    intraday strategies anchor to, but which this engine didn't compute at all
+    before. None if there's no volume yet.
+    """
+    total_volume = sum(b.volume for b in bars_today)
+    if total_volume <= 0:
+        return None
+    total_value = sum(((b.high + b.low + b.close) / 3) * b.volume for b in bars_today)
+    return total_value / total_volume
+
+
 def build_bucket(
-    bar: HistoricalBar, quote: Quote | None, lookback_bars: list[HistoricalBar]
+    bar: HistoricalBar,
+    quote: Quote | None,
+    lookback_bars: list[HistoricalBar],
+    today_bars: list[HistoricalBar] | None = None,
 ) -> MetricBucket:
+    """`today_bars` should be all of today's 5-min bars from market open through
+    `bar`, inclusive (used for the session VWAP) -- defaults to just `[bar]` itself
+    if omitted, which degrades gracefully to a single-bar VWAP rather than raising,
+    since most callers (tests, anything not wiring up the live poll loop) don't care
+    about VWAP accumulation.
+    """
     est_buy, est_sell = _estimate_buy_sell_volume(bar)
     body, upper_wick, lower_wick = _candle_stats(bar)
     spread = None
@@ -171,4 +203,5 @@ def build_bucket(
         upper_wick=upper_wick,
         lower_wick=lower_wick,
         rvol=compute_rvol(bar, lookback_bars),
+        vwap=compute_vwap(today_bars if today_bars is not None else [bar]),
     )

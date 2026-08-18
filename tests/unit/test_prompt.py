@@ -93,6 +93,26 @@ def test_prompt_gap_pct_is_none_without_prior_close_or_buckets():
     assert ticker_state_payload["gap_pct"] is None
 
 
+def test_prompt_includes_vwap_and_deviation():
+    # Regression test for gap 3: VWAP wasn't computed at all before -- the standard
+    # intraday momentum reference line most strategies anchor to was invisible.
+    t0 = datetime(2026, 8, 17, 9, 30, tzinfo=UTC)
+    t1 = t0.replace(minute=35)
+    bar0 = HistoricalBar("AAPL", t0, 100, 102, 98, 100, 1_000)  # typical=100, value=100_000
+    bar1 = HistoricalBar("AAPL", t1, 100, 104, 100, 102, 3_000)  # typical=102, value=306_000
+    bucket0 = build_bucket(bar0, quote=None, lookback_bars=[], today_bars=[bar0])
+    bucket1 = build_bucket(bar1, quote=None, lookback_bars=[], today_bars=[bar0, bar1])
+    state = TickerState(completed_trades_today=0, open_positions=0, realized_pnl_today=0.0)
+
+    prompt = build_prompt("AAPL", [bucket0, bucket1], state)
+
+    payload = json.loads(prompt.split("Input:\n", 1)[1])
+    second_bucket = payload["buckets"][1]
+    assert second_bucket["vwap"] == 101.5  # (100_000 + 306_000) / 4_000
+    assert round(second_bucket["vwap_deviation_pct"], 4) == round((102 - 101.5) / 101.5 * 100, 4)
+    assert "vwap_deviation_pct" in prompt.split("Input:\n", 1)[0]  # mentioned in instructions
+
+
 def test_prompt_serializes_when_lookback_buckets_carry_decimal_fields():
     # Regression test: lookback buckets read back from the DB come back as Decimal
     # (state/models.py's Bucket columns are SQLAlchemy Numeric, despite the
@@ -118,6 +138,8 @@ def test_prompt_serializes_when_lookback_buckets_carry_decimal_fields():
         upper_wick=Decimal("0.5"),
         lower_wick=Decimal("1.0"),
         rvol=Decimal("1.2311"),
+        book_imbalance=Decimal("0.5"),
+        vwap=Decimal("100.25"),
     )
     fresh_bucket = build_bucket(
         HistoricalBar("AAPL", t1, 100.5, 103, 100, 102.5, 1500), quote=None, lookback_bars=[]
