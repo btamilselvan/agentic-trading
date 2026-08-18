@@ -13,7 +13,7 @@ from collections.abc import Sequence
 from decimal import Decimal
 
 from agentic_trading.llm.schema import TickerState
-from agentic_trading.market_data.bucket_builder import BucketLike
+from agentic_trading.market_data.bucket_builder import BucketLike, pct_change
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +32,13 @@ breakout" setup, as opposed to ordinary intraday drift. Each bucket's \
 vwap_deviation_pct is that bucket's close versus the session VWAP so far: \
 sustained positive readings with rising volume support momentum continuation or a \
 breakout holding; a move back toward/through zero suggests the move is fading or \
-being rejected.
+being rejected. If present, market_context describes the broad market today via a \
+benchmark index ETF (change_pct and vwap_deviation_pct mean the same thing as \
+above, but for the whole market; range_pct is today's high-low range as a % of \
+open, a volatility proxy). Weigh the ticker's own setup against this: a breakout \
+aligned with a trending market (same direction, comparable magnitude) is more \
+reliable than the same-looking breakout while the broad market is flat or moving \
+the other way -- treat market_context as a modifier on confidence, not a veto.
 
 Respond with a single JSON object matching this contract:
 - decision: "BUY" or "HOLD"
@@ -62,16 +68,6 @@ def _num(value: float | Decimal | None) -> float | None:
     return None if value is None else float(value)
 
 
-def _pct_deviation(value: float | None, reference: float | None) -> float | None:
-    """`value` vs. `reference` as a percentage -- shared by gap_pct (today_open vs.
-    prior_close) and vwap_deviation_pct (close vs. vwap) so a small local model
-    never has to do this arithmetic itself (see gap 5: computed indicators).
-    """
-    if value is None or reference is None or reference == 0:
-        return None
-    return (value - reference) / reference * 100
-
-
 def _bucket_to_dict(bucket: BucketLike) -> dict:
     close = _num(bucket.close)
     vwap = _num(bucket.vwap)
@@ -95,7 +91,7 @@ def _bucket_to_dict(bucket: BucketLike) -> dict:
         "lower_wick": _num(bucket.lower_wick),
         "rvol": _num(bucket.rvol),
         "vwap": vwap,
-        "vwap_deviation_pct": _pct_deviation(close, vwap),
+        "vwap_deviation_pct": pct_change(close, vwap),
     }
 
 
@@ -113,8 +109,20 @@ def build_prompt(
             "realized_pnl": ticker_state.realized_pnl_today,
             "prior_close": prior_close,
             "today_open": today_open,
-            "gap_pct": _pct_deviation(today_open, prior_close),
+            "gap_pct": pct_change(today_open, prior_close),
         },
     }
+    if ticker_state.market_benchmark_ticker:
+        # Omitted entirely (not sent as an all-null section) when the benchmark
+        # fetch failed outright this cycle -- scheduler.py leaves
+        # market_benchmark_ticker unset in that case. Individual fields inside can
+        # still be null even when present (e.g. no prior-day history yet for the
+        # benchmark), same as ticker_state_today's own prior_close/gap_pct.
+        payload["market_context"] = {
+            "benchmark_ticker": ticker_state.market_benchmark_ticker,
+            "change_pct": ticker_state.market_change_pct,
+            "vwap_deviation_pct": ticker_state.market_vwap_deviation_pct,
+            "range_pct": ticker_state.market_range_pct,
+        }
     logger.debug("payload %s", payload)
     return f"{_SYSTEM_INSTRUCTIONS}\nInput:\n{json.dumps(payload, indent=2)}"

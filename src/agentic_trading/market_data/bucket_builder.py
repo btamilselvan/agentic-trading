@@ -15,6 +15,14 @@ VWAP is likewise a bar-based approximation (typical price = (H+L+C)/3 per bar,
 volume-weighted across the session) rather than computed from a real trade tape --
 see `compute_vwap`. This is the standard approach when only OHLCV bars are
 available and is what most retail charting tools compute anyway.
+
+`build_market_context` gives the LLM broad-market context (a ticker in isolation
+looks the same during a market-wide rally as during a market-wide selloff, but the
+setup's reliability is very different) -- built from a benchmark ticker (SPY by
+default, see config.market_benchmark_ticker) using the same bar-based machinery as
+everything else here. No VIX: Robinhood/robin_stocks don't reliably expose index
+quotes, so `range_pct` (today's benchmark high-low range as a % of its open) stands
+in as a realized-volatility proxy instead.
 """
 
 from __future__ import annotations
@@ -78,6 +86,18 @@ class MetricBucket:
     lower_wick: float
     rvol: float | None
     vwap: float | None
+
+
+def pct_change(value: float | None, reference: float | None) -> float | None:
+    """`value` vs. `reference` as a percentage -- e.g. gap_pct (today's open vs.
+    prior close), vwap_deviation_pct (close vs. vwap), and market_context's
+    change_pct/vwap_deviation_pct all reduce to this. Centralized here (rather than
+    duplicated per call site) so a small local LLM is never asked to do this
+    arithmetic itself -- see gap 5 (computed indicators).
+    """
+    if value is None or reference is None or reference == 0:
+        return None
+    return (value - reference) / reference * 100
 
 
 def _estimate_buy_sell_volume(bar: HistoricalBar) -> tuple[int, int]:
@@ -204,4 +224,41 @@ def build_bucket(
         lower_wick=lower_wick,
         rvol=compute_rvol(bar, lookback_bars),
         vwap=compute_vwap(today_bars if today_bars is not None else [bar]),
+    )
+
+
+@dataclass(frozen=True)
+class MarketContext:
+    """Broad-market snapshot (spec 3.2 doesn't name this explicitly, but every
+    named intraday setup -- breakout, absorption, mean reversion, continuation --
+    reads very differently depending on whether the whole market is moving with the
+    ticker or against it). Ephemeral: built fresh each poll cycle from the
+    benchmark's own bars, never persisted per-ticker-bucket.
+    """
+
+    ticker: str
+    change_pct: float | None  # benchmark's move today, prior close -> latest close
+    vwap_deviation_pct: float | None  # benchmark's latest close vs. its own session VWAP
+    range_pct: float | None  # today's high-low range as a % of open -- volatility proxy
+
+
+def build_market_context(
+    ticker: str, bars_today: list[HistoricalBar], lookback_bars: list[HistoricalBar]
+) -> MarketContext:
+    if not bars_today:
+        return MarketContext(
+            ticker=ticker, change_pct=None, vwap_deviation_pct=None, range_pct=None
+        )
+
+    latest = bars_today[-1]
+    prior_close = find_prior_close(latest, lookback_bars)
+    vwap = compute_vwap(bars_today)
+    day_open = bars_today[0].open
+    day_high = max(b.high for b in bars_today)
+    day_low = min(b.low for b in bars_today)
+    return MarketContext(
+        ticker=ticker,
+        change_pct=pct_change(latest.close, prior_close),
+        vwap_deviation_pct=pct_change(latest.close, vwap),
+        range_pct=(day_high - day_low) / day_open * 100 if day_open else None,
     )

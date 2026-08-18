@@ -29,7 +29,12 @@ from agentic_trading.execution.guardrails import check_daily_trade_cap, check_po
 from agentic_trading.llm.base import LLMClient
 from agentic_trading.llm.schema import TickerState
 from agentic_trading.market_data import robinhood_client as rh
-from agentic_trading.market_data.bucket_builder import build_bucket, find_prior_close
+from agentic_trading.market_data.bucket_builder import (
+    MarketContext,
+    build_bucket,
+    build_market_context,
+    find_prior_close,
+)
 from agentic_trading.state import repository as repo
 from agentic_trading.state.db import session_scope
 from agentic_trading.state.models import TradingModeEnum
@@ -50,6 +55,28 @@ async def _get_lookback_bars(ticker: str) -> list:
     return _rvol_lookback_cache[ticker]
 
 
+async def _get_market_context(settings: Settings) -> MarketContext | None:
+    """Fetched once per poll cycle (not once per ticker -- it's the same broad-market
+    snapshot for every ticker being polled this cycle), from settings.market_
+    benchmark_ticker (SPY by default; empty string disables it). Isolated with its
+    own try/except so a benchmark-fetch hiccup degrades to "no market context" for
+    this cycle rather than taking down the whole poll cycle -- same isolation
+    principle as each ticker's own try/except in run_poll_cycle.
+    """
+    benchmark = settings.market_benchmark_ticker
+    if not benchmark:
+        return None
+    try:
+        bars_today = await asyncio.to_thread(rh.get_5min_historicals, benchmark, span="day")
+        lookback = await _get_lookback_bars(benchmark)
+    except Exception:
+        logger.exception(
+            "Failed to fetch market context (%s) -- proceeding without it", benchmark
+        )
+        return None
+    return build_market_context(benchmark, bars_today, lookback)
+
+
 async def _realized_pnl_today_all_tickers(session, today) -> float:
     total = 0.0
     for ticker in get_settings().watchlist:
@@ -65,6 +92,7 @@ async def _poll_ticker(
     llm_client: LLMClient,
     settings: Settings,
     notifier: Notifier,
+    market_context: MarketContext | None = None,
 ) -> None:
     # robin_stocks is synchronous -- run it in a worker thread rather than block the
     # event loop this scheduler (and the whole FastAPI app) shares. Left unwrapped,
@@ -144,6 +172,12 @@ async def _poll_ticker(
             open_positions=daily_state.open_positions_count,
             realized_pnl_today=float(daily_state.realized_pnl or 0),
             prior_close=find_prior_close(latest_bar, lookback),
+            market_benchmark_ticker=market_context.ticker if market_context else None,
+            market_change_pct=market_context.change_pct if market_context else None,
+            market_vwap_deviation_pct=(
+                market_context.vwap_deviation_pct if market_context else None
+            ),
+            market_range_pct=market_context.range_pct if market_context else None,
         )
 
         # Get insights from LLM using today's Metrics
@@ -261,10 +295,17 @@ async def run_poll_cycle(
         )
         return
 
+    market_context = await _get_market_context(settings)
+
     for ticker in settings.watchlist:
         try:
             await _poll_ticker(
-                ticker, broker=broker, llm_client=llm_client, settings=settings, notifier=notifier
+                ticker,
+                broker=broker,
+                llm_client=llm_client,
+                settings=settings,
+                notifier=notifier,
+                market_context=market_context,
             )
         except Exception:
             logger.exception("Poll cycle failed for %s", ticker)

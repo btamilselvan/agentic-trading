@@ -1,5 +1,12 @@
 """Structured LLM output contract (spec section 3.2), plus the per-ticker trade-state
 DTO fed alongside the bucket history so the LLM knows what's already happened today.
+
+TickerState has broadened beyond strictly "trade state" (completed_trades_today etc.)
+to also carry same-day context the LLM otherwise has no way to see: prior_close (gap
+detection) and now the market_* fields (broad-market conditions, see
+market_data.bucket_builder.MarketContext) -- kept flat here rather than as a nested
+object to match the existing prior_close precedent, and because build_prompt renders
+them under their own "market_context" section regardless of how they're carried here.
 """
 
 from __future__ import annotations
@@ -16,6 +23,10 @@ class TickerState:
     open_positions: int
     realized_pnl_today: float
     prior_close: float | None = None
+    market_benchmark_ticker: str | None = None
+    market_change_pct: float | None = None
+    market_vwap_deviation_pct: float | None = None
+    market_range_pct: float | None = None
 
 
 class TradeDecision(BaseModel):

@@ -51,6 +51,21 @@ class FakeLLMClient:
         return self.decision, "prompt-text", "{}"
 
 
+class CapturingLLMClient:
+    """Records the TickerState it was called with, per ticker, so tests can assert
+    on what scheduler.py threaded through (e.g. market_context fields) without
+    having to parse the rendered prompt text.
+    """
+
+    def __init__(self, decision: TradeDecision):
+        self.decision = decision
+        self.ticker_states: dict[str, TickerState] = {}
+
+    async def decide(self, ticker, bucket_history, ticker_state: TickerState):
+        self.ticker_states[ticker] = ticker_state
+        return self.decision, "prompt-text", "{}"
+
+
 class ExplodingLLMClient:
     async def decide(self, ticker, bucket_history, ticker_state):
         raise AssertionError("LLM should not have been called for an ineligible ticker")
@@ -133,6 +148,88 @@ async def test_poll_cycle_persists_bucket_and_skips_reprocessing_same_bucket(
 
     assert await _bucket_count("AAPL") == 1
     assert llm.calls == 1  # second call was a no-op (bucket already recorded)
+
+
+async def test_run_poll_cycle_fetches_market_context_once_and_threads_it_in(
+    db_session, monkeypatch
+):
+    spy_bar = HistoricalBar("SPY", BUCKET_START, 400, 406, 398, 404, 5_000)
+    call_counts: dict[tuple[str, str], int] = {}
+
+    def fake_get_5min_historicals(ticker, span="day", bounds="regular"):
+        key = (ticker, span)
+        call_counts[key] = call_counts.get(key, 0) + 1
+        if ticker == "SPY":
+            return [spy_bar]
+        return [HistoricalBar(ticker, BUCKET_START, 100, 101, 99, 100.5, 1_000)]
+
+    monkeypatch.setattr(scheduler.rh, "get_5min_historicals", fake_get_5min_historicals)
+    monkeypatch.setattr(scheduler.rh, "get_quote", lambda ticker: None)
+    scheduler._rvol_lookback_cache.clear()
+
+    llm = CapturingLLMClient(TradeDecision(decision="HOLD", confidence_score=0.2))
+    settings = _settings(watchlist=["AAPL", "TSLA"], market_benchmark_ticker="SPY")
+
+    await scheduler.run_poll_cycle(
+        broker=DryRunBrokerClient(), llm_client=llm, settings=settings, now=MID_WINDOW
+    )
+
+    # fetched once for the whole cycle (day bars + week lookback), not once per
+    # watchlist ticker -- with 2 tickers, a bug that re-fetched per ticker would
+    # show up here as 4 calls instead of 2.
+    assert call_counts[("SPY", "day")] == 1
+    assert call_counts[("SPY", "week")] == 1
+    aapl_state = llm.ticker_states["AAPL"]
+    tsla_state = llm.ticker_states["TSLA"]
+    assert aapl_state.market_benchmark_ticker == "SPY"
+    # both tickers see the identical market snapshot for this cycle
+    assert aapl_state.market_range_pct == tsla_state.market_range_pct == (406 - 398) / 400 * 100
+
+
+async def test_market_context_fetch_failure_degrades_gracefully(db_session, monkeypatch):
+    aapl_bar = HistoricalBar("AAPL", BUCKET_START, 100, 101, 99, 100.5, 1_000)
+
+    def fake_get_5min_historicals(ticker, span="day", bounds="regular"):
+        if ticker == "SPY":
+            raise RuntimeError("benchmark fetch failed")
+        return [aapl_bar]
+
+    monkeypatch.setattr(scheduler.rh, "get_5min_historicals", fake_get_5min_historicals)
+    monkeypatch.setattr(scheduler.rh, "get_quote", lambda ticker: None)
+    scheduler._rvol_lookback_cache.clear()
+
+    llm = CapturingLLMClient(TradeDecision(decision="HOLD", confidence_score=0.2))
+    settings = _settings(watchlist=["AAPL"], market_benchmark_ticker="SPY")
+
+    await scheduler.run_poll_cycle(
+        broker=DryRunBrokerClient(), llm_client=llm, settings=settings, now=MID_WINDOW
+    )
+
+    assert await _bucket_count("AAPL") == 1  # per-ticker polling still succeeded
+    assert llm.ticker_states["AAPL"].market_benchmark_ticker is None  # degraded, not crashed
+
+
+async def test_market_benchmark_ticker_empty_disables_market_context(db_session, monkeypatch):
+    aapl_bar = HistoricalBar("AAPL", BUCKET_START, 100, 101, 99, 100.5, 1_000)
+    call_counts: dict[str, int] = {}
+
+    def fake_get_5min_historicals(ticker, span="day", bounds="regular"):
+        call_counts[ticker] = call_counts.get(ticker, 0) + 1
+        return [aapl_bar]
+
+    monkeypatch.setattr(scheduler.rh, "get_5min_historicals", fake_get_5min_historicals)
+    monkeypatch.setattr(scheduler.rh, "get_quote", lambda ticker: None)
+    scheduler._rvol_lookback_cache.clear()
+
+    llm = CapturingLLMClient(TradeDecision(decision="HOLD", confidence_score=0.2))
+    settings = _settings(watchlist=["AAPL"], market_benchmark_ticker="")
+
+    await scheduler.run_poll_cycle(
+        broker=DryRunBrokerClient(), llm_client=llm, settings=settings, now=MID_WINDOW
+    )
+
+    assert set(call_counts) == {"AAPL"}  # never fetched a benchmark at all
+    assert llm.ticker_states["AAPL"].market_benchmark_ticker is None
 
 
 async def test_poll_cycle_opens_and_closes_trade_on_high_confidence_buy(db_session, monkeypatch):

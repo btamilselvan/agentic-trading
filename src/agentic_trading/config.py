@@ -90,6 +90,12 @@ class Settings(BaseSettings):
         default_factory=lambda: ["AAPL", "TSLA", "NVDA"]
     )
     confidence_threshold: float = 0.7
+    # Broad-market benchmark the LLM is shown alongside each ticker's own bucket
+    # history, so a ticker-specific breakout can be weighed against whether the
+    # whole market is trending with it or against it (see llm/prompt.py's
+    # market_context). Empty string disables it -- the poll loop then skips the
+    # extra fetch and the LLM sees no market_context section at all.
+    market_benchmark_ticker: str = "SPY"
 
     @field_validator("watchlist", mode="before")
     @classmethod

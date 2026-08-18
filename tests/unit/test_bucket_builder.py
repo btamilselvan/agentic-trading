@@ -2,9 +2,11 @@ from datetime import UTC, datetime, timedelta
 
 from agentic_trading.market_data.bucket_builder import (
     build_bucket,
+    build_market_context,
     compute_rvol,
     compute_vwap,
     find_prior_close,
+    pct_change,
 )
 from agentic_trading.market_data.robinhood_client import HistoricalBar, Quote
 
@@ -204,3 +206,41 @@ def test_build_bucket_uses_today_bars_for_vwap_when_provided():
     bar1 = _bar(t1, 100, 104, 100, 102, 3_000)
     bucket = build_bucket(bar1, quote=None, lookback_bars=[], today_bars=[bar0, bar1])
     assert bucket.vwap == 101.5  # same accumulation as test_compute_vwap_accumulates_...
+
+
+def test_pct_change_basic():
+    assert pct_change(103.0, 100.0) == 3.0
+    assert pct_change(97.0, 100.0) == -3.0
+
+
+def test_pct_change_none_when_either_side_missing_or_reference_zero():
+    assert pct_change(None, 100.0) is None
+    assert pct_change(100.0, None) is None
+    assert pct_change(100.0, 0.0) is None
+
+
+def test_build_market_context_none_fields_without_any_bars():
+    ctx = build_market_context("SPY", bars_today=[], lookback_bars=[])
+    assert ctx.ticker == "SPY"
+    assert ctx.change_pct is None
+    assert ctx.vwap_deviation_pct is None
+    assert ctx.range_pct is None
+
+
+def test_build_market_context_computes_change_vwap_deviation_and_range():
+    today = datetime(2026, 8, 17, 9, 30, tzinfo=UTC)
+    # prior day's last bar closes at 400 -- the benchmark's "prior close"
+    lookback = [_bar(today - timedelta(days=1, hours=1), 0, 0, 0, 400.0, 1, symbol="SPY")]
+    bars_today = [
+        _bar(today, 404, 406, 402, 404, 1_000, symbol="SPY"),
+        _bar(today + timedelta(minutes=5), 404, 410, 404, 408, 1_000, symbol="SPY"),
+    ]
+
+    ctx = build_market_context("SPY", bars_today, lookback)
+
+    assert ctx.ticker == "SPY"
+    # latest close vs prior close
+    assert round(ctx.change_pct, 4) == round((408 - 400) / 400 * 100, 4)
+    vwap = compute_vwap(bars_today)
+    assert round(ctx.vwap_deviation_pct, 4) == round((408 - vwap) / vwap * 100, 4)
+    assert round(ctx.range_pct, 4) == round((410 - 402) / 404 * 100, 4)  # day high/low vs day open

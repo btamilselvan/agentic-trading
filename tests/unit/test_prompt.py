@@ -34,6 +34,7 @@ def test_prompt_contains_full_bucket_history_and_ticker_state():
         "today_open": 100.0,
         "gap_pct": None,
     }
+    assert "market_context" not in payload  # no benchmark configured on this state
 
 
 def test_prompt_includes_book_depth_fields():
@@ -111,6 +112,40 @@ def test_prompt_includes_vwap_and_deviation():
     assert second_bucket["vwap"] == 101.5  # (100_000 + 306_000) / 4_000
     assert round(second_bucket["vwap_deviation_pct"], 4) == round((102 - 101.5) / 101.5 * 100, 4)
     assert "vwap_deviation_pct" in prompt.split("Input:\n", 1)[0]  # mentioned in instructions
+
+
+def test_prompt_includes_market_context_when_present():
+    # Regression test for gap 4: a ticker-specific setup was evaluated with no
+    # sense of whether the broad market was moving with or against it.
+    state = TickerState(
+        completed_trades_today=0,
+        open_positions=0,
+        realized_pnl_today=0.0,
+        market_benchmark_ticker="SPY",
+        market_change_pct=1.5,
+        market_vwap_deviation_pct=0.3,
+        market_range_pct=0.8,
+    )
+
+    prompt = build_prompt("AAPL", [], state)
+
+    payload = json.loads(prompt.split("Input:\n", 1)[1])
+    assert payload["market_context"] == {
+        "benchmark_ticker": "SPY",
+        "change_pct": 1.5,
+        "vwap_deviation_pct": 0.3,
+        "range_pct": 0.8,
+    }
+    assert "market_context" in prompt.split("Input:\n", 1)[0]  # mentioned in instructions
+
+
+def test_prompt_omits_market_context_when_no_benchmark_configured():
+    state = TickerState(completed_trades_today=0, open_positions=0, realized_pnl_today=0.0)
+
+    prompt = build_prompt("AAPL", [], state)
+
+    payload = json.loads(prompt.split("Input:\n", 1)[1])
+    assert "market_context" not in payload
 
 
 def test_prompt_serializes_when_lookback_buckets_carry_decimal_fields():

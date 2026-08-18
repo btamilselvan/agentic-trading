@@ -57,6 +57,9 @@ Then fill in at least:
 - `ROBINHOOD_USERNAME` / `ROBINHOOD_PASSWORD` — for market-data polling only. On first run, `robin_stocks`
   prompts for an MFA code on stdin unless a cached session already exists at `ROBINHOOD_TOKEN_PATH`.
 - `WATCHLIST` — comma-separated tickers to trade.
+- `MARKET_BENCHMARK_TICKER` — broad-market ETF (default `SPY`) shown to the LLM alongside each ticker's
+  own bucket history, so it can weigh a ticker-specific setup against the day's overall market trend.
+  Set to empty to disable.
 - `WEBHOOK_URL` — optional; a Slack/Discord/Telegram-compatible incoming webhook URL for trade alerts.
   Leave blank to disable alerting.
 - `ROBINHOOD_AGENTIC_ACCOUNT_NUMBER` — required for any real MCP call (`MODE=LIVE`, or the
