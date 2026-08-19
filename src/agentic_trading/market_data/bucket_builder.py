@@ -38,6 +38,11 @@ bucket of the day already in `bucket_history` (the same anchor build_prompt alre
 uses for today_open/gap_pct) rather than from wall-clock time + timezone/config --
 no new dependency on config.py needed here, consistent with the rest of this module
 taking its inputs as plain parameters.
+
+`compute_rsi` is Wilder's RSI (Relative Strength Index) computed from bar-to-bar
+closes, plain Python rather than pandas-ta -- the spec's suggested library -- since
+nothing else in this module (or the project) uses pandas, and RSI's smoothing
+algorithm is simple enough not to justify a first-time dependency for one indicator.
 """
 
 from __future__ import annotations
@@ -76,6 +81,7 @@ class BucketLike(Protocol):
     lower_wick: float
     rvol: float | None
     vwap: float | None
+    rsi: float | None
 
 
 @dataclass(frozen=True)
@@ -101,6 +107,7 @@ class MetricBucket:
     lower_wick: float
     rvol: float | None
     vwap: float | None
+    rsi: float | None
 
 
 def pct_change(value: float | None, reference: float | None) -> float | None:
@@ -216,17 +223,65 @@ def compute_vwap(bars_today: list[HistoricalBar]) -> float | None:
     return total_value / total_volume
 
 
+def compute_rsi(bars_today: list[HistoricalBar], period: int = 14) -> float | None:
+    """Wilder's RSI as of the most recent bar in `bars_today`, from bar-to-bar
+    closes: average gain and average loss over `period` bars, smoothed Wilder-style
+    (each new bar folds in as 1/period of the running average, rather than a plain
+    rolling mean), then RSI = 100 - 100 / (1 + avg_gain / avg_loss). >70 is
+    conventionally overbought, <30 oversold, 50 the momentum centerline (see
+    `rsi_centerline_cross`).
+
+    None until there are at least `period + 1` closes (i.e. `period` bar-to-bar
+    deltas) to seed the first average from -- same "not enough history yet"
+    treatment as compute_rvol/find_prior_close.
+    """
+    closes = [b.close for b in bars_today]
+    if len(closes) < period + 1:
+        return None
+    deltas = [closes[i] - closes[i - 1] for i in range(1, len(closes))]
+    gains = [max(d, 0.0) for d in deltas]
+    losses = [max(-d, 0.0) for d in deltas]
+    avg_gain = sum(gains[:period]) / period
+    avg_loss = sum(losses[:period]) / period
+    for gain, loss in zip(gains[period:], losses[period:], strict=True):
+        avg_gain = (avg_gain * (period - 1) + gain) / period
+        avg_loss = (avg_loss * (period - 1) + loss) / period
+    if avg_loss == 0:
+        return 100.0  # every bar in the window was a gain (or flat) -- maximally overbought
+    if avg_gain == 0:
+        return 0.0  # every bar was a loss (or flat) -- maximally oversold
+    rs = avg_gain / avg_loss
+    return 100 - (100 / (1 + rs))
+
+
+def rsi_centerline_cross(prev_rsi: float | None, rsi: float | None) -> str | None:
+    """"up" if RSI crosses above its 50 centerline from at/below (momentum turning
+    bullish), "down" for the reverse; None if there's no crossing, no prior bucket's
+    RSI to compare against, or either RSI is unavailable (not enough history yet).
+    Same shape as detect_vwap_cross -- a discrete crossing event a small local model
+    doesn't have to infer itself by diffing a raw RSI series.
+    """
+    if prev_rsi is None or rsi is None:
+        return None
+    was_above = prev_rsi > 50
+    is_above = rsi > 50
+    if was_above == is_above:
+        return None
+    return "up" if is_above else "down"
+
+
 def build_bucket(
     bar: HistoricalBar,
     quote: Quote | None,
     lookback_bars: list[HistoricalBar],
     today_bars: list[HistoricalBar] | None = None,
+    rsi_period: int = 14,
 ) -> MetricBucket:
     """`today_bars` should be all of today's 5-min bars from market open through
-    `bar`, inclusive (used for the session VWAP) -- defaults to just `[bar]` itself
-    if omitted, which degrades gracefully to a single-bar VWAP rather than raising,
-    since most callers (tests, anything not wiring up the live poll loop) don't care
-    about VWAP accumulation.
+    `bar`, inclusive (used for the session VWAP and RSI) -- defaults to just `[bar]`
+    itself if omitted, which degrades gracefully to a single-bar VWAP and a null RSI
+    rather than raising, since most callers (tests, anything not wiring up the live
+    poll loop) don't care about VWAP/RSI accumulation.
     """
     est_buy, est_sell = _estimate_buy_sell_volume(bar)
     body, upper_wick, lower_wick = _candle_stats(bar)
@@ -257,6 +312,7 @@ def build_bucket(
         lower_wick=lower_wick,
         rvol=compute_rvol(bar, lookback_bars),
         vwap=compute_vwap(today_bars if today_bars is not None else [bar]),
+        rsi=compute_rsi(today_bars if today_bars is not None else [bar], period=rsi_period),
     )
 
 

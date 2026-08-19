@@ -85,6 +85,7 @@ class Bucket(Base):
     lower_wick: Mapped[float] = mapped_column(Numeric(12, 4))
     rvol: Mapped[float | None] = mapped_column(Numeric(12, 4), nullable=True)
     vwap: Mapped[float | None] = mapped_column(Numeric(12, 4), nullable=True)
+    rsi: Mapped[float | None] = mapped_column(Numeric(5, 2), nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(_TZDateTime, default=_utcnow)
 

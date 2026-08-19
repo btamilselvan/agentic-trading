@@ -60,6 +60,8 @@ Then fill in at least:
 - `MARKET_BENCHMARK_TICKER` — broad-market ETF (default `SPY`) shown to the LLM alongside each ticker's
   own bucket history, so it can weigh a ticker-specific setup against the day's overall market trend.
   Set to empty to disable.
+- `RSI_PERIOD` — Wilder-smoothed RSI lookback period in bars (default `14`), computed intraday from
+  5-min closes. Reads `null` until this many bars have accumulated.
 - `WEBHOOK_URL` — optional; a Slack/Discord/Telegram-compatible incoming webhook URL for trade alerts.
   Leave blank to disable alerting.
 - `ROBINHOOD_AGENTIC_ACCOUNT_NUMBER` — required for any real MCP call (`MODE=LIVE`, or the

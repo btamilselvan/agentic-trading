@@ -3,12 +3,14 @@ from datetime import UTC, datetime, timedelta
 from agentic_trading.market_data.bucket_builder import (
     build_bucket,
     build_market_context,
+    compute_rsi,
     compute_rvol,
     compute_vwap,
     detect_vwap_cross,
     find_prior_close,
     minutes_since_open,
     pct_change,
+    rsi_centerline_cross,
     session_phase,
 )
 from agentic_trading.market_data.robinhood_client import HistoricalBar, Quote
@@ -300,3 +302,70 @@ def test_session_phase_morning_trend_between_30_and_120_minutes():
 def test_session_phase_midday_chop_after_120_minutes():
     assert session_phase(120) == "MIDDAY_CHOP"
     assert session_phase(240) == "MIDDAY_CHOP"
+
+
+def _closes_bars(closes, start=datetime(2026, 8, 17, 9, 30, tzinfo=UTC)):
+    return [
+        _bar(start + timedelta(minutes=5 * i), c, c, c, c, 100) for i, c in enumerate(closes)
+    ]
+
+
+def test_compute_rsi_none_without_enough_bars():
+    # period=2 needs 2 deltas -> 3 closes; only 2 given
+    assert compute_rsi(_closes_bars([100, 102]), period=2) is None
+
+
+def test_compute_rsi_seeds_from_simple_average_of_first_period_deltas():
+    # closes [100, 102, 101] -> deltas [+2, -1] -> avg_gain=1, avg_loss=0.5
+    # rs=2 -> rsi = 100 - 100/3 = 66.6667
+    rsi = compute_rsi(_closes_bars([100, 102, 101]), period=2)
+    assert round(rsi, 4) == round(100 - 100 / 3, 4)
+
+
+def test_compute_rsi_100_when_every_bar_in_window_gained():
+    rsi = compute_rsi(_closes_bars([100, 101, 102]), period=2)
+    assert rsi == 100.0
+
+
+def test_compute_rsi_0_when_every_bar_in_window_lost():
+    rsi = compute_rsi(_closes_bars([102, 101, 100]), period=2)
+    assert rsi == 0.0
+
+
+def test_compute_rsi_applies_wilder_smoothing_beyond_the_seed_window():
+    # closes [100, 102, 101, 103] -> deltas [+2, -1, +2]
+    # seed (first 2 deltas): avg_gain=1, avg_loss=0.5
+    # smoothed with 3rd delta (+2, loss=0): avg_gain=(1*1+2)/2=1.5, avg_loss=(0.5*1+0)/2=0.25
+    # rs=6 -> rsi = 100 - 100/7
+    rsi = compute_rsi(_closes_bars([100, 102, 101, 103]), period=2)
+    assert round(rsi, 4) == round(100 - 100 / 7, 4)
+
+
+def test_build_bucket_rsi_none_when_today_bars_too_short():
+    bar = _bar(datetime(2026, 8, 17, 9, 30, tzinfo=UTC), 100, 106, 98, 103, 1_000)
+    bucket = build_bucket(bar, quote=None, lookback_bars=[], today_bars=[bar], rsi_period=14)
+    assert bucket.rsi is None
+
+
+def test_build_bucket_uses_today_bars_and_rsi_period_for_rsi():
+    bars = _closes_bars([100, 102, 101])
+    bucket = build_bucket(bars[-1], quote=None, lookback_bars=[], today_bars=bars, rsi_period=2)
+    assert round(bucket.rsi, 4) == round(100 - 100 / 3, 4)
+
+
+def test_rsi_centerline_cross_up_when_crossing_above_50():
+    assert rsi_centerline_cross(prev_rsi=45.0, rsi=55.0) == "up"
+
+
+def test_rsi_centerline_cross_down_when_crossing_below_50():
+    assert rsi_centerline_cross(prev_rsi=55.0, rsi=45.0) == "down"
+
+
+def test_rsi_centerline_cross_none_when_staying_on_the_same_side():
+    assert rsi_centerline_cross(prev_rsi=55.0, rsi=60.0) is None
+    assert rsi_centerline_cross(prev_rsi=45.0, rsi=40.0) is None
+
+
+def test_rsi_centerline_cross_none_when_either_rsi_missing():
+    assert rsi_centerline_cross(None, 55.0) is None
+    assert rsi_centerline_cross(45.0, None) is None

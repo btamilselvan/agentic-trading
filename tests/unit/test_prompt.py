@@ -1,6 +1,6 @@
 import json
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from agentic_trading.llm.prompt import build_prompt
@@ -233,6 +233,7 @@ def test_prompt_serializes_when_lookback_buckets_carry_decimal_fields():
         rvol=Decimal("1.2311"),
         book_imbalance=Decimal("0.5"),
         vwap=Decimal("100.25"),
+        rsi=Decimal("55.25"),
     )
     fresh_bucket = build_bucket(
         HistoricalBar("AAPL", t1, 100.5, 103, 100, 102.5, 1500), quote=None, lookback_bars=[]
@@ -271,6 +272,33 @@ def test_prompt_includes_session_time_context():
     assert third["minutes_since_open"] == 135
     assert third["session_phase"] == "MIDDAY_CHOP"
     assert "session_phase" in prompt.split("Input:\n", 1)[0]  # mentioned in instructions
+
+
+def test_prompt_includes_rsi_and_centerline_cross():
+    # Regression test for gap 7: RSI wasn't computed at all before -- the standard
+    # overbought/oversold oscillator most intraday strategies also watch.
+    t0 = datetime(2026, 8, 17, 9, 30, tzinfo=UTC)
+    bars = [
+        HistoricalBar("AAPL", t0 + timedelta(minutes=5 * i), c, c, c, c, 100)
+        for i, c in enumerate([100, 102, 101])
+    ]
+    buckets = [
+        build_bucket(bars[i], quote=None, lookback_bars=[], today_bars=bars[: i + 1], rsi_period=2)
+        for i in range(len(bars))
+    ]
+    state = TickerState(completed_trades_today=0, open_positions=0, realized_pnl_today=0.0)
+
+    prompt = build_prompt("AAPL", buckets, state)
+
+    payload = json.loads(prompt.split("Input:\n", 1)[1])
+    first, second, third = payload["buckets"]
+    assert first["rsi"] is None  # only 1 close -- not enough for period=2
+    assert second["rsi"] is None  # only 2 closes -- still not enough (needs 3)
+    assert round(third["rsi"], 4) == round(100 - 100 / 3, 4)
+    # second bucket's rsi is None, so there's no prior rsi for the third bucket to
+    # compare against -- no crossing can be recorded regardless of third's own rsi.
+    assert third["rsi_centerline_cross"] is None
+    assert "rsi_centerline_cross" in prompt.split("Input:\n", 1)[0]  # mentioned in instructions
 
 
 def test_prompt_includes_decision_contract_fields():

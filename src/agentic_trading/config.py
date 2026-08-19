@@ -96,6 +96,11 @@ class Settings(BaseSettings):
     # market_context). Empty string disables it -- the poll loop then skips the
     # extra fetch and the LLM sees no market_context section at all.
     market_benchmark_ticker: str = "SPY"
+    # RSI lookback period (bars), Wilder-smoothed -- spec section 6 says "RSI-14 or
+    # RSI-9"; 14 is the conventional default. Computed intraday from 5-min closes,
+    # so this many bars (70 minutes at RSI-14) must accumulate before RSI reads
+    # non-null (see bucket_builder.compute_rsi).
+    rsi_period: int = 14
 
     @field_validator("watchlist", mode="before")
     @classmethod

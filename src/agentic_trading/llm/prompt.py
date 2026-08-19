@@ -19,6 +19,7 @@ from agentic_trading.market_data.bucket_builder import (
     detect_vwap_cross,
     minutes_since_open,
     pct_change,
+    rsi_centerline_cross,
     session_phase,
 )
 
@@ -59,7 +60,16 @@ the trading day: "OPENING_VOLATILITY" (first 30 minutes) breakouts are common bu
 noisier and more prone to failing, "MORNING_TREND" (30-120 minutes) is where trend \
 continuation setups are most reliable, and "MIDDAY_CHOP" (120+ minutes) favors \
 mean-reversion/absorption setups over fresh breakouts -- weigh confidence \
-accordingly rather than treating every phase's setups as equally reliable.
+accordingly rather than treating every phase's setups as equally reliable. Each \
+bucket's rsi is a 0-100 momentum oscillator (null until enough bars have \
+accumulated intraday); above 70 is conventionally overbought (a breakout here is \
+more likely to be extended/exhausted), below 30 oversold (a bounce here is more \
+likely to be a mean-reversion setup than continuation), and rsi_centerline_cross \
+is "up"/"down" on the specific bucket where rsi crosses its 50 centerline (a \
+sharper momentum-shift signal than the raw level alone) or null otherwise. Also \
+watch for divergence across the bucket series: price making a new high while rsi \
+fails to make a new high (or the reverse) warns the move may be losing momentum \
+even though price is still advancing.
 
 Respond with a single JSON object matching this contract:
 - decision: "BUY" or "HOLD"
@@ -96,6 +106,8 @@ def _bucket_to_dict(
     vwap = _num(bucket.vwap)
     prev_close = _num(previous.close) if previous else None
     prev_vwap = _num(previous.vwap) if previous else None
+    rsi = _num(bucket.rsi)
+    prev_rsi = _num(previous.rsi) if previous else None
     minutes_open = minutes_since_open(bucket.bucket_start, session_start)
     return {
         "bucket_start": bucket.bucket_start.isoformat(),
@@ -129,6 +141,10 @@ def _bucket_to_dict(
         # 09:35 than at 11:15. See bucket_builder.session_phase for the boundaries.
         "minutes_since_open": minutes_open,
         "session_phase": session_phase(minutes_open),
+        # RSI (requirements.md section 6) -- Wilder-smoothed, plain Python (see
+        # bucket_builder.compute_rsi); null until enough bars have accumulated.
+        "rsi": rsi,
+        "rsi_centerline_cross": rsi_centerline_cross(prev_rsi, rsi),
     }
 
 
