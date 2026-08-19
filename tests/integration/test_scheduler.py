@@ -71,12 +71,23 @@ class ExplodingLLMClient:
         raise AssertionError("LLM should not have been called for an ineligible ticker")
 
 
+def _patch_catalyst_context(monkeypatch):
+    """Neutral (no news, no float) stub for the catalyst-context fetch every
+    _poll_ticker call now makes -- without this, tests that don't care about gap 8
+    at all would fall through to the real robin_stocks calls.
+    """
+    monkeypatch.setattr(scheduler.rh, "get_latest_news", lambda ticker: None)
+    monkeypatch.setattr(scheduler.rh, "get_float_shares", lambda ticker: None)
+    scheduler._float_shares_cache.clear()
+
+
 def _patch_market_data(monkeypatch, bar: HistoricalBar, quote: Quote | None = None):
     monkeypatch.setattr(
         scheduler.rh, "get_5min_historicals", lambda ticker, span="day", bounds="regular": [bar]
     )
     monkeypatch.setattr(scheduler.rh, "get_quote", lambda ticker: quote)
     scheduler._rvol_lookback_cache.clear()
+    _patch_catalyst_context(monkeypatch)
 
 
 async def _bucket_count(ticker: str) -> int:
@@ -166,6 +177,7 @@ async def test_run_poll_cycle_fetches_market_context_once_and_threads_it_in(
     monkeypatch.setattr(scheduler.rh, "get_5min_historicals", fake_get_5min_historicals)
     monkeypatch.setattr(scheduler.rh, "get_quote", lambda ticker: None)
     scheduler._rvol_lookback_cache.clear()
+    _patch_catalyst_context(monkeypatch)
 
     llm = CapturingLLMClient(TradeDecision(decision="HOLD", confidence_score=0.2))
     settings = _settings(watchlist=["AAPL", "TSLA"], market_benchmark_ticker="SPY")
@@ -197,6 +209,7 @@ async def test_market_context_fetch_failure_degrades_gracefully(db_session, monk
     monkeypatch.setattr(scheduler.rh, "get_5min_historicals", fake_get_5min_historicals)
     monkeypatch.setattr(scheduler.rh, "get_quote", lambda ticker: None)
     scheduler._rvol_lookback_cache.clear()
+    _patch_catalyst_context(monkeypatch)
 
     llm = CapturingLLMClient(TradeDecision(decision="HOLD", confidence_score=0.2))
     settings = _settings(watchlist=["AAPL"], market_benchmark_ticker="SPY")
@@ -220,6 +233,7 @@ async def test_market_benchmark_ticker_empty_disables_market_context(db_session,
     monkeypatch.setattr(scheduler.rh, "get_5min_historicals", fake_get_5min_historicals)
     monkeypatch.setattr(scheduler.rh, "get_quote", lambda ticker: None)
     scheduler._rvol_lookback_cache.clear()
+    _patch_catalyst_context(monkeypatch)
 
     llm = CapturingLLMClient(TradeDecision(decision="HOLD", confidence_score=0.2))
     settings = _settings(watchlist=["AAPL"], market_benchmark_ticker="")
@@ -230,6 +244,95 @@ async def test_market_benchmark_ticker_empty_disables_market_context(db_session,
 
     assert set(call_counts) == {"AAPL"}  # never fetched a benchmark at all
     assert llm.ticker_states["AAPL"].market_benchmark_ticker is None
+
+
+async def test_poll_cycle_threads_catalyst_context_into_ticker_state(db_session, monkeypatch):
+    from agentic_trading.market_data.robinhood_client import NewsItem
+
+    bar = HistoricalBar("AAPL", BUCKET_START, 100, 101, 99, 100.5, 1_000)
+    _patch_market_data(monkeypatch, bar)
+    news = NewsItem(
+        title="Company announces buyback",
+        summary="Summary text",
+        published_at=BUCKET_START,
+        source="Reuters",
+    )
+    monkeypatch.setattr(scheduler.rh, "get_latest_news", lambda ticker: news)
+    monkeypatch.setattr(scheduler.rh, "get_float_shares", lambda ticker: 15_000_000)
+
+    llm = CapturingLLMClient(TradeDecision(decision="HOLD", confidence_score=0.2))
+
+    await scheduler.run_poll_cycle(
+        broker=DryRunBrokerClient(), llm_client=llm, settings=_settings(), now=MID_WINDOW
+    )
+
+    state = llm.ticker_states["AAPL"]
+    assert state.news_headline == "Company announces buyback"
+    assert state.news_summary == "Summary text"
+    assert state.news_published_at == BUCKET_START
+    assert state.float_shares == 15_000_000
+
+
+async def test_catalyst_context_fetch_failure_degrades_gracefully(db_session, monkeypatch):
+    bar = HistoricalBar("AAPL", BUCKET_START, 100, 101, 99, 100.5, 1_000)
+    _patch_market_data(monkeypatch, bar)
+
+    def raise_error(ticker):
+        raise RuntimeError("news feed unavailable")
+
+    monkeypatch.setattr(scheduler.rh, "get_latest_news", raise_error)
+    monkeypatch.setattr(scheduler.rh, "get_float_shares", raise_error)
+
+    llm = CapturingLLMClient(TradeDecision(decision="HOLD", confidence_score=0.2))
+
+    await scheduler.run_poll_cycle(
+        broker=DryRunBrokerClient(), llm_client=llm, settings=_settings(), now=MID_WINDOW
+    )
+
+    assert await _bucket_count("AAPL") == 1  # per-ticker polling still succeeded
+    state = llm.ticker_states["AAPL"]
+    assert state.news_headline is None
+    assert state.float_shares is None  # degraded, not crashed
+
+
+async def test_float_shares_is_fetched_once_per_ticker_across_poll_cycles(db_session, monkeypatch):
+    # Static intraday, so re-fetching every 5-minute poll is wasted work -- see
+    # scheduler._float_shares_cache.
+    float_call_counts: dict[str, int] = {}
+    day_call_counts: dict[str, int] = {}
+
+    def fake_get_5min_historicals(ticker, span="day", bounds="regular"):
+        if span != "day":
+            return []
+        day_call_counts[ticker] = day_call_counts.get(ticker, 0) + 1
+        # A distinct bucket_start per call so the second poll cycle isn't skipped
+        # as "already recorded".
+        start = BUCKET_START + timedelta(minutes=5 * (day_call_counts[ticker] - 1))
+        return [HistoricalBar(ticker, start, 100, 101, 99, 100.5, 1_000)]
+
+    def fake_get_float_shares(ticker):
+        float_call_counts[ticker] = float_call_counts.get(ticker, 0) + 1
+        return 15_000_000
+
+    monkeypatch.setattr(scheduler.rh, "get_5min_historicals", fake_get_5min_historicals)
+    monkeypatch.setattr(scheduler.rh, "get_quote", lambda ticker: None)
+    monkeypatch.setattr(scheduler.rh, "get_latest_news", lambda ticker: None)
+    monkeypatch.setattr(scheduler.rh, "get_float_shares", fake_get_float_shares)
+    scheduler._rvol_lookback_cache.clear()
+    scheduler._float_shares_cache.clear()
+
+    llm = CapturingLLMClient(TradeDecision(decision="HOLD", confidence_score=0.2))
+    settings = _settings(market_benchmark_ticker="")  # no SPY fetch to account for
+
+    await scheduler.run_poll_cycle(
+        broker=DryRunBrokerClient(), llm_client=llm, settings=settings, now=MID_WINDOW
+    )
+    await scheduler.run_poll_cycle(
+        broker=DryRunBrokerClient(), llm_client=llm, settings=settings, now=MID_WINDOW
+    )
+
+    assert day_call_counts["AAPL"] == 2  # sanity-check both cycles actually ran
+    assert float_call_counts["AAPL"] == 1
 
 
 async def test_poll_cycle_opens_and_closes_trade_on_high_confidence_buy(db_session, monkeypatch):

@@ -55,6 +55,37 @@ async def _get_lookback_bars(ticker: str) -> list:
     return _rvol_lookback_cache[ticker]
 
 
+# Float shares barely move intraday, so unlike bars/quotes this is fetched once per
+# ticker per process lifetime rather than every 5-minute poll -- same treatment as
+# _rvol_lookback_cache above.
+_float_shares_cache: dict[str, int | None] = {}
+
+
+async def _get_float_shares(ticker: str) -> int | None:
+    if ticker not in _float_shares_cache:
+        try:
+            _float_shares_cache[ticker] = await asyncio.to_thread(rh.get_float_shares, ticker)
+        except Exception:
+            logger.exception(
+                "Failed to fetch float shares for %s -- proceeding without it", ticker
+            )
+            _float_shares_cache[ticker] = None
+    return _float_shares_cache[ticker]
+
+
+async def _get_latest_news(ticker: str) -> rh.NewsItem | None:
+    """Unlike float, re-fetched every poll cycle -- a news story can land at any
+    point in the session, unlike float which is effectively static intraday.
+    Isolated with its own try/except so a news-feed hiccup degrades to "no catalyst
+    context" for this ticker this cycle rather than blocking the poll.
+    """
+    try:
+        return await asyncio.to_thread(rh.get_latest_news, ticker)
+    except Exception:
+        logger.exception("Failed to fetch news for %s -- proceeding without it", ticker)
+        return None
+
+
 async def _get_market_context(settings: Settings) -> MarketContext | None:
     """Fetched once per poll cycle (not once per ticker -- it's the same broad-market
     snapshot for every ticker being polled this cycle), from settings.market_
@@ -170,6 +201,12 @@ async def _poll_ticker(
         history = await repo.get_buckets_for_ticker(
             session, ticker, since=datetime.combine(today, time.min, tzinfo=UTC)
         )
+        # Catalyst context (requirements.md section 6) -- fetched here, not
+        # up-front like market_context, since it's per-ticker (no benefit to
+        # sharing across the watchlist) and only worth the extra calls once we
+        # know this ticker is actually eligible for a new trade this cycle.
+        news = await _get_latest_news(ticker)
+        float_shares = await _get_float_shares(ticker)
         ticker_state = TickerState(
             completed_trades_today=daily_state.completed_trades_count,
             open_positions=daily_state.open_positions_count,
@@ -181,6 +218,10 @@ async def _poll_ticker(
                 market_context.vwap_deviation_pct if market_context else None
             ),
             market_range_pct=market_context.range_pct if market_context else None,
+            news_headline=news.title if news else None,
+            news_summary=news.summary if news else None,
+            news_published_at=news.published_at if news else None,
+            float_shares=float_shares,
         )
 
         # Get insights from LLM using today's Metrics

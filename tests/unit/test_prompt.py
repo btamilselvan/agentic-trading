@@ -301,6 +301,56 @@ def test_prompt_includes_rsi_and_centerline_cross():
     assert "rsi_centerline_cross" in prompt.split("Input:\n", 1)[0]  # mentioned in instructions
 
 
+def test_prompt_includes_catalyst_context_when_present():
+    # Regression test for gap 8: news/float were fetched but never reached the LLM.
+    state = TickerState(
+        completed_trades_today=0,
+        open_positions=0,
+        realized_pnl_today=0.0,
+        news_headline="Company announces buyback",
+        news_summary="Summary text",
+        news_published_at=datetime(2026, 8, 19, 9, 0, tzinfo=UTC),
+        float_shares=15_000_000,
+    )
+
+    prompt = build_prompt("AAPL", [], state)
+
+    payload = json.loads(prompt.split("Input:\n", 1)[1])
+    assert payload["catalyst_context"] == {
+        "news_headline": "Company announces buyback",
+        "news_summary": "Summary text",
+        "news_published_at": "2026-08-19T09:00:00+00:00",
+        "float_shares": 15_000_000,
+    }
+    assert "catalyst_context" in prompt.split("Input:\n", 1)[0]  # mentioned in instructions
+    assert "short interest" in prompt.split("Input:\n", 1)[0].lower()
+
+
+def test_prompt_omits_catalyst_context_when_nothing_fetched():
+    state = TickerState(completed_trades_today=0, open_positions=0, realized_pnl_today=0.0)
+
+    prompt = build_prompt("AAPL", [], state)
+
+    payload = json.loads(prompt.split("Input:\n", 1)[1])
+    assert "catalyst_context" not in payload
+
+
+def test_prompt_includes_catalyst_context_with_float_only():
+    # No news this cycle, but float_shares alone is still worth surfacing.
+    state = TickerState(
+        completed_trades_today=0,
+        open_positions=0,
+        realized_pnl_today=0.0,
+        float_shares=8_000_000,
+    )
+
+    prompt = build_prompt("AAPL", [], state)
+
+    payload = json.loads(prompt.split("Input:\n", 1)[1])
+    assert payload["catalyst_context"]["float_shares"] == 8_000_000
+    assert payload["catalyst_context"]["news_headline"] is None
+
+
 def test_prompt_includes_decision_contract_fields():
     prompt = build_prompt("AAPL", [], TickerState(0, 0, 0.0))
     for field in (

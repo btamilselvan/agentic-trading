@@ -69,7 +69,15 @@ is "up"/"down" on the specific bucket where rsi crosses its 50 centerline (a \
 sharper momentum-shift signal than the raw level alone) or null otherwise. Also \
 watch for divergence across the bucket series: price making a new high while rsi \
 fails to make a new high (or the reverse) warns the move may be losing momentum \
-even though price is still advancing.
+even though price is still advancing. If present, catalyst_context surfaces \
+same-day qualitative signals: news_headline/news_summary/news_published_at (a \
+recent story that could plausibly explain an otherwise-unexplained volume/price \
+move) and float_shares (shares available for trading -- below ~20M is \
+conventionally a "low float", which tends to amplify breakout moves but can also \
+reverse just as sharply, so treat it as a reason for a tighter target/faster exit \
+rather than higher confidence on its own). Short interest is not available from \
+the current data sources and is never included -- do not assume its absence means \
+low short interest.
 
 Respond with a single JSON object matching this contract:
 - decision: "BUY" or "HOLD"
@@ -183,6 +191,21 @@ def build_prompt(
             "change_pct": ticker_state.market_change_pct,
             "vwap_deviation_pct": ticker_state.market_vwap_deviation_pct,
             "range_pct": ticker_state.market_range_pct,
+        }
+    if ticker_state.news_headline is not None or ticker_state.float_shares is not None:
+        # Omitted entirely (not sent as an all-null section) when neither fetch
+        # turned up anything this cycle -- same treatment as market_context.
+        # Short interest is deliberately absent -- see llm/prompt.py's docstring
+        # note in _SYSTEM_INSTRUCTIONS and robinhood_client.py's module docstring.
+        payload["catalyst_context"] = {
+            "news_headline": ticker_state.news_headline,
+            "news_summary": ticker_state.news_summary,
+            "news_published_at": (
+                ticker_state.news_published_at.isoformat()
+                if ticker_state.news_published_at
+                else None
+            ),
+            "float_shares": ticker_state.float_shares,
         }
     logger.debug("payload %s", payload)
     return f"{_SYSTEM_INSTRUCTIONS}\nInput:\n{json.dumps(payload, indent=2)}"

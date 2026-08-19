@@ -86,6 +86,12 @@ An autonomous, lightweight intraday trading service built in Python (FastAPI) th
   * **Relative Strength Index (RSI):** 5-minute intraday RSI (calculated locally via Pandas-TA using RSI-14 or RSI-9) to evaluate overbought/oversold boundaries, centerline 50 crossovers, and price/RSI momentum divergence.
 ---
 
+**Implementation notes (Claude Code, 2026-08-19):**
+* News headline/summary and float size are implemented (`market_data/robinhood_client.get_latest_news`/`get_float_shares`, fetched per-ticker each poll cycle and threaded into the LLM prompt as `catalyst_context`).
+* **Short interest % is NOT implemented** -- neither robin_stocks nor the Robinhood API expose it (no field, no endpoint), and unlike buy/sell volume or book depth there's no reasonable OHLCV-only proxy for it. Would need a third-party data provider to add later.
+* RSI is implemented in plain Python (Wilder's smoothing) rather than Pandas-TA, since nothing else in this project uses pandas and the algorithm doesn't justify a first-time dependency for one indicator.
+* Session Time Context boundaries (30 / 120 minutes) aren't specified above, so they default to the existing `MARKET_OPEN_TIME`/`EVALUATION_WINDOW_END_TIME` poll window (09:30-11:30) rather than being separately configurable.
+
 ## References
 * [Robinhood API Documentation](https://robinhood.com/us/en/support/articles/robinhood-api/)
 * [Unofficial Robinhood API Documentation](https://github.com/sanko/Robinhood)

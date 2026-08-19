@@ -4,6 +4,13 @@ This is the ONLY module that imports robin_stocks. Order execution never goes th
 here — that's the Robinhood MCP client's job (see execution/broker_mcp_client.py).
 Keeping the two brokerage integrations behind separate, narrow modules is what lets
 market-data and order-execution be swapped independently later.
+
+`get_latest_news`/`get_float_shares` back requirements.md section 6's "Qualitative
+Catalyst & Metadata" (Phase 2): the most recent news story and float size, both from
+robin_stocks (`get_news`/`get_fundamentals`). Short interest %, the third field that
+section asks for, is NOT available from robin_stocks or the Robinhood API at all --
+no field, no endpoint -- so it's simply not computed anywhere in this project (same
+treatment as the missing VIX feed in bucket_builder.build_market_context).
 """
 
 from __future__ import annotations
@@ -66,6 +73,14 @@ class Quote:
     updated_at: datetime | None
 
 
+@dataclass(frozen=True)
+class NewsItem:
+    title: str
+    summary: str | None
+    published_at: datetime | None
+    source: str | None
+
+
 def _parse_timestamp(value: str) -> datetime:
     return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
@@ -126,3 +141,44 @@ def get_quote(symbol: str) -> Quote | None:
         last_trade_price=_to_float(row.get("last_trade_price")),
         updated_at=updated_at,
     )
+
+
+def get_latest_news(symbol: str) -> NewsItem | None:
+    """Most recent news story for `symbol`, or None if there's no news at all, or
+    every row is missing a title (robin_stocks occasionally returns placeholder/
+    empty rows). get_news doesn't document a guaranteed order, so this explicitly
+    picks the max by published_at rather than assuming raw[0] is the latest; if no
+    row has a usable timestamp, it falls back to whatever order the feed returned.
+    """
+    ensure_login()
+    raw = rh.stocks.get_news(symbol)
+    if not raw:
+        return None
+    items = [
+        NewsItem(
+            title=row["title"],
+            summary=row.get("summary") or None,
+            published_at=(
+                _parse_timestamp(row["published_at"]) if row.get("published_at") else None
+            ),
+            source=row.get("source") or None,
+        )
+        for row in raw
+        if row and row.get("title")
+    ]
+    if not items:
+        return None
+    dated = [item for item in items if item.published_at is not None]
+    return max(dated, key=lambda item: item.published_at) if dated else items[0]
+
+
+def get_float_shares(symbol: str) -> int | None:
+    """Float size (requirements.md section 6's "<20M shares indication") from
+    get_fundamentals. None if fundamentals are unavailable or the float field is
+    missing/blank for this symbol.
+    """
+    ensure_login()
+    raw = rh.stocks.get_fundamentals(symbol)
+    if not raw or not raw[0]:
+        return None
+    return _to_int(raw[0].get("float"))
