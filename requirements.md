@@ -1,5 +1,13 @@
 # Requirements Document: Robinhood Autonomous Intraday Momentum Trader
 
+## Change Log & Revision History
+> **Instructions for Claude Code:** Always inspect this log first to see what was modified recently.
+
+* **v1.1.0 (2026-08-19):** Added Phase 2 requirements (In progress).
+* **v1.0.0 (2026-08-15):** Initial Phase 1 release (Completed).
+
+## Phase 1: Core MVP (Completed)
+
 ## 1. Executive Summary
 An autonomous, lightweight intraday trading service built in Python (FastAPI) that polls real-time market microstructure data during market open. It processes 5-minute time-series buckets (buy/sell volume, price velocity, bid-ask dynamics), passes the complete metric stream to an LLM agent for intraday pattern analysis, and automatically executes bracket/paired intraday orders (Buy Limit + Target Sell Limit) designed to enter and exit within the same trading session.
 
@@ -69,12 +77,15 @@ An autonomous, lightweight intraday trading service built in Python (FastAPI) th
 
 ---
 
-## 6. Robinhood API vs Robinhood MCP
+## Phase 2: Enhanced Data Collection enhancements (WIP)
 
-* Should both be used or either one?
-
+## 6. Data Collection (continued...)
+* **Metrics Ingested per 5-Minute Bucket:**
+  * **Qualitative Catalyst & Metadata:** Real-time news headline flag/summary, Float size (<20M shares indication), and short interest %.
+  * **Session Time Context:** `minutes_since_open` and session classification (`Opening Volatility`, `Morning Trend`, or `Midday Chop`).
+  * **Relative Strength Index (RSI):** 5-minute intraday RSI (calculated locally via Pandas-TA using RSI-14 or RSI-9) to evaluate overbought/oversold boundaries, centerline 50 crossovers, and price/RSI momentum divergence.
 ---
 
-## 7. References
+## References
 * [Robinhood API Documentation](https://robinhood.com/us/en/support/articles/robinhood-api/)
 * [Unofficial Robinhood API Documentation](https://github.com/sanko/Robinhood)

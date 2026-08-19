@@ -246,6 +246,33 @@ def test_prompt_serializes_when_lookback_buckets_carry_decimal_fields():
     assert isinstance(payload["buckets"][0]["close"], float)
 
 
+def test_prompt_includes_session_time_context():
+    # Regression test for gap 6: minutes_since_open/session_phase weren't computed
+    # at all before -- the LLM had no sense of where in the day a bucket fell.
+    t0 = datetime(2026, 8, 17, 9, 30, tzinfo=UTC)
+    t1 = t0.replace(minute=35)
+    t2 = t0.replace(hour=11, minute=45)  # 135 minutes after session start
+    bars = [
+        HistoricalBar("AAPL", t0, 100, 101, 99, 100, 1_000),
+        HistoricalBar("AAPL", t1, 100, 101, 99, 100, 1_000),
+        HistoricalBar("AAPL", t2, 100, 101, 99, 100, 1_000),
+    ]
+    buckets = [build_bucket(bar, quote=None, lookback_bars=[]) for bar in bars]
+    state = TickerState(completed_trades_today=0, open_positions=0, realized_pnl_today=0.0)
+
+    prompt = build_prompt("AAPL", buckets, state)
+
+    payload = json.loads(prompt.split("Input:\n", 1)[1])
+    first, second, third = payload["buckets"]
+    assert first["minutes_since_open"] == 0
+    assert first["session_phase"] == "OPENING_VOLATILITY"
+    assert second["minutes_since_open"] == 5
+    assert second["session_phase"] == "OPENING_VOLATILITY"
+    assert third["minutes_since_open"] == 135
+    assert third["session_phase"] == "MIDDAY_CHOP"
+    assert "session_phase" in prompt.split("Input:\n", 1)[0]  # mentioned in instructions
+
+
 def test_prompt_includes_decision_contract_fields():
     prompt = build_prompt("AAPL", [], TickerState(0, 0, 0.0))
     for field in (

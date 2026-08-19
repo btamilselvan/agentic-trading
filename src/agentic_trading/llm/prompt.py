@@ -10,10 +10,17 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Sequence
+from datetime import datetime
 from decimal import Decimal
 
 from agentic_trading.llm.schema import TickerState
-from agentic_trading.market_data.bucket_builder import BucketLike, detect_vwap_cross, pct_change
+from agentic_trading.market_data.bucket_builder import (
+    BucketLike,
+    detect_vwap_cross,
+    minutes_since_open,
+    pct_change,
+    session_phase,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +54,12 @@ keeps climbing is a warning sign of exhaustion. vwap_cross is "up" on the bucket
 where price reclaims its session VWAP from below, "down" where it breaks below \
 from above, and null otherwise -- a reclaim aligned with volume is a stronger \
 breakout signal than price merely drifting above VWAP without ever having crossed \
-it intraday.
+it intraday. Each bucket's minutes_since_open and session_phase place it within \
+the trading day: "OPENING_VOLATILITY" (first 30 minutes) breakouts are common but \
+noisier and more prone to failing, "MORNING_TREND" (30-120 minutes) is where trend \
+continuation setups are most reliable, and "MIDDAY_CHOP" (120+ minutes) favors \
+mean-reversion/absorption setups over fresh breakouts -- weigh confidence \
+accordingly rather than treating every phase's setups as equally reliable.
 
 Respond with a single JSON object matching this contract:
 - decision: "BUY" or "HOLD"
@@ -77,11 +89,14 @@ def _num(value: float | Decimal | None) -> float | None:
     return None if value is None else float(value)
 
 
-def _bucket_to_dict(bucket: BucketLike, previous: BucketLike | None) -> dict:
+def _bucket_to_dict(
+    bucket: BucketLike, previous: BucketLike | None, session_start: datetime
+) -> dict:
     close = _num(bucket.close)
     vwap = _num(bucket.vwap)
     prev_close = _num(previous.close) if previous else None
     prev_vwap = _num(previous.vwap) if previous else None
+    minutes_open = minutes_since_open(bucket.bucket_start, session_start)
     return {
         "bucket_start": bucket.bucket_start.isoformat(),
         "open": _num(bucket.open),
@@ -109,6 +124,11 @@ def _bucket_to_dict(bucket: BucketLike, previous: BucketLike | None) -> dict:
         "close_change_pct": pct_change(close, prev_close),
         "volume_change_pct": pct_change(bucket.volume, previous.volume if previous else None),
         "vwap_cross": detect_vwap_cross(prev_close, prev_vwap, close, vwap),
+        # Session time context (requirements.md section 6) -- where this bucket
+        # falls within the trading day, so the LLM weighs a setup differently at
+        # 09:35 than at 11:15. See bucket_builder.session_phase for the boundaries.
+        "minutes_since_open": minutes_open,
+        "session_phase": session_phase(minutes_open),
     }
 
 
@@ -119,9 +139,11 @@ def build_prompt(
     prior_close = ticker_state.prior_close
     buckets_payload = []
     previous: BucketLike | None = None
-    for bucket in bucket_history:
-        buckets_payload.append(_bucket_to_dict(bucket, previous))
-        previous = bucket
+    if bucket_history:
+        session_start = bucket_history[0].bucket_start
+        for bucket in bucket_history:
+            buckets_payload.append(_bucket_to_dict(bucket, previous, session_start))
+            previous = bucket
     payload = {
         "ticker": ticker,
         "buckets": buckets_payload,

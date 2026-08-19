@@ -29,6 +29,15 @@ crosses its own session VWAP (a "VWAP reclaim" or "VWAP breakdown") -- llm/promp
 uses it, plus per-bucket close_change_pct/volume_change_pct, so a small local model
 doesn't have to infer momentum/volume trend or a crossing event by eyeballing a raw
 series of buckets itself.
+
+Phase 2 (requirements.md section 6) adds session time context: `minutes_since_open`
+and `session_phase` classify each bucket by how far into the trading day it falls
+(OPENING_VOLATILITY / MORNING_TREND / MIDDAY_CHOP), since the same-looking setup
+means different things at 09:35 vs. 11:15. Both are computed relative to the first
+bucket of the day already in `bucket_history` (the same anchor build_prompt already
+uses for today_open/gap_pct) rather than from wall-clock time + timezone/config --
+no new dependency on config.py needed here, consistent with the rest of this module
+taking its inputs as plain parameters.
 """
 
 from __future__ import annotations
@@ -306,3 +315,37 @@ def detect_vwap_cross(
     if was_above == is_above:
         return None
     return "up" if is_above else "down"
+
+
+# Session-phase boundaries, in minutes elapsed since the first bucket of the day.
+# Not wired to config (market_open_time/evaluation_window_end_time) -- these are
+# fixed defaults approximating the standard 09:30-11:30 poll window rather than a
+# new piece of configurable strategy surface for what's meant to be Phase 2's
+# lowest-risk gap.
+_OPENING_VOLATILITY_MINUTES = 30
+_MORNING_TREND_END_MINUTES = 120
+
+
+def minutes_since_open(bucket_start: datetime, session_start: datetime) -> int:
+    """Elapsed minutes between `session_start` (the first bucket of the trading day
+    -- bucket_history[0].bucket_start, the same anchor build_prompt already uses for
+    today_open/gap_pct) and `bucket_start`. A plain timestamp difference -- no
+    timezone conversion needed since both are already-fetched datetimes in the same
+    timezone as each other.
+    """
+    return int((bucket_start - session_start).total_seconds() // 60)
+
+
+def session_phase(minutes_open: int) -> str:
+    """Classifies elapsed session time into one of three phases (requirements.md
+    section 6): "OPENING_VOLATILITY" for the first `_OPENING_VOLATILITY_MINUTES`
+    (choppy, breakout-prone but noisier -- many opening-range breakouts fail),
+    "MORNING_TREND" through `_MORNING_TREND_END_MINUTES` (the window where trend
+    continuation setups are most reliable), then "MIDDAY_CHOP" (fresh breakouts are
+    less common; mean-reversion/absorption setups are more characteristic).
+    """
+    if minutes_open < _OPENING_VOLATILITY_MINUTES:
+        return "OPENING_VOLATILITY"
+    if minutes_open < _MORNING_TREND_END_MINUTES:
+        return "MORNING_TREND"
+    return "MIDDAY_CHOP"

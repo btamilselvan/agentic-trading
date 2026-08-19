@@ -7,7 +7,9 @@ from agentic_trading.market_data.bucket_builder import (
     compute_vwap,
     detect_vwap_cross,
     find_prior_close,
+    minutes_since_open,
     pct_change,
+    session_phase,
 )
 from agentic_trading.market_data.robinhood_client import HistoricalBar, Quote
 
@@ -272,3 +274,29 @@ def test_detect_vwap_cross_none_when_any_input_missing():
     assert detect_vwap_cross(99.0, None, 101.0, 100.5) is None
     assert detect_vwap_cross(99.0, 100.0, None, 100.5) is None
     assert detect_vwap_cross(99.0, 100.0, 101.0, None) is None
+
+
+def test_minutes_since_open_zero_at_session_start():
+    session_start = datetime(2026, 8, 17, 9, 30, tzinfo=UTC)
+    assert minutes_since_open(session_start, session_start) == 0
+
+
+def test_minutes_since_open_computes_elapsed_minutes():
+    session_start = datetime(2026, 8, 17, 9, 30, tzinfo=UTC)
+    bucket_start = session_start + timedelta(minutes=45)
+    assert minutes_since_open(bucket_start, session_start) == 45
+
+
+def test_session_phase_opening_volatility_before_30_minutes():
+    assert session_phase(0) == "OPENING_VOLATILITY"
+    assert session_phase(29) == "OPENING_VOLATILITY"
+
+
+def test_session_phase_morning_trend_between_30_and_120_minutes():
+    assert session_phase(30) == "MORNING_TREND"
+    assert session_phase(119) == "MORNING_TREND"
+
+
+def test_session_phase_midday_chop_after_120_minutes():
+    assert session_phase(120) == "MIDDAY_CHOP"
+    assert session_phase(240) == "MIDDAY_CHOP"
