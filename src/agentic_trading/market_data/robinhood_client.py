@@ -90,7 +90,6 @@ def get_5min_historicals(
     """
     ensure_login()
     raw = rh.stocks.get_stock_historicals(symbol, interval="5minute", span=span, bounds=bounds)
-    logger.debug("historicals data for span %s and bounds %s, data: %s", span, bounds, raw)
     bars: list[HistoricalBar] = []
     for row in raw or []:
         if not row:

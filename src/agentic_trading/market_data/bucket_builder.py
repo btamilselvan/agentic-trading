@@ -107,6 +107,24 @@ def pct_change(value: float | None, reference: float | None) -> float | None:
 
 
 def _estimate_buy_sell_volume(bar: HistoricalBar) -> tuple[int, int]:
+    """Chaikin-style money-flow-multiplier proxy (see module docstring): splits the
+    bar's total volume between "buy" and "sell" based on WHERE in its high/low range
+    the bar closed, not on any real trade classification.
+
+    - `(close - low) - (high - close)` compares the close's distance from the low
+      vs. its distance from the high. It's +rng if close == high (closed at the very
+      top -- maximum buying pressure), -rng if close == low (closed at the very
+      bottom -- maximum selling pressure), and 0 if close sits exactly mid-range.
+    - Dividing by `rng` normalizes that to `buy_ratio` in [-1, 1], then
+      `(1 + buy_ratio) / 2` rescales it to `buy_fraction` in [0, 1] -- the fraction
+      of the bar's volume attributed to buying.
+    - `est_buy = volume * buy_fraction`, and `est_sell` is simply the remainder, so
+      the two always sum back to the bar's total volume exactly.
+
+    Degenerate case: a zero-range bar (high == low, e.g. a single print or a halt)
+    or zero volume has no close-position signal to read, so the volume (if any) is
+    just split evenly instead of dividing by a zero `rng`.
+    """
     rng = bar.high - bar.low
     if rng <= 0 or bar.volume <= 0:
         half = bar.volume // 2
