@@ -3,7 +3,7 @@
 ## Change Log & Revision History
 > **Instructions for Claude Code:** Always inspect this log first to see what was modified recently.
 
-* **v1.1.0 (2026-08-19):** Added Phase 2 requirements (In progress).
+* **v1.1.0 (2026-08-19):** Added Phase 2 requirements (Completed).
 * **v1.0.0 (2026-08-15):** Initial Phase 1 release (Completed).
 
 ## Phase 1: Core MVP (Completed)
@@ -79,7 +79,7 @@ An autonomous, lightweight intraday trading service built in Python (FastAPI) th
 
 ## Phase 2: Enhanced Data Collection enhancements (WIP)
 
-## 6. Data Collection (continued...)
+## 6. Data Collection (Completed)
 * **Metrics Ingested per 5-Minute Bucket:**
   * **Qualitative Catalyst & Metadata:** Real-time news headline flag/summary, Float size (<20M shares indication), and short interest %.
   * **Session Time Context:** `minutes_since_open` and session classification (`Opening Volatility`, `Morning Trend`, or `Midday Chop`).
