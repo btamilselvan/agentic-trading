@@ -77,8 +77,9 @@ def compute_order_quantity(limit_price: float, max_capital_per_trade_usd: float)
 class TradeEntryOutcome:
     opened: bool
     reason: str | None = None
-    trade_id: int | None = None
-    order_id: int | None = None
+    trade_id: int | None = None  # our trades.id (internal PK, also Order.trade_id's FK target)
+    order_id: int | None = None  # our orders.id (internal PK) for the BUY leg
+    broker_order_id: str | None = None  # the real broker-side order id (e.g. MCP order UUID)
 
 
 async def _mark_order_filled(
@@ -143,9 +144,14 @@ async def try_enter_position(
         logger.info("Guardrail blocked BUY for %s: %s", ticker, guardrail_result.reason)
         return TradeEntryOutcome(opened=False, reason=guardrail_result.reason)
 
+    logger.info("All guardrails cleared for %s BUY order, quantity %s limit_price %s", ticker, quantity, decision.buy_limit_price)
+
     review = await broker.review_order(
         ticker=ticker, side="buy", quantity=quantity, limit_price=decision.buy_limit_price
     )
+    
+    logger.info("Placing BUY order for %s (qty=%s @ $%s)", ticker, quantity, decision.buy_limit_price)
+    
     if review.warnings:
         logger.warning("Broker review warnings for %s BUY: %s", ticker, review.warnings)
 
@@ -181,7 +187,9 @@ async def try_enter_position(
         await _mark_order_filled(session, order, fill_price, notifier)
         await _place_paired_sell(session, broker, order, trade, notifier)
 
-    return TradeEntryOutcome(opened=True, trade_id=trade.id, order_id=order.id)
+    return TradeEntryOutcome(
+        opened=True, trade_id=trade.id, order_id=order.id, broker_order_id=order.broker_order_id
+    )
 
 
 async def _place_paired_sell(
@@ -248,29 +256,49 @@ async def poll_pending_buy_orders(
     order_timeout_minutes: int,
     notifier: Notifier | None = None,
 ) -> None:
-    """Runs every poll cycle: cancels unfilled BUY orders past the timeout guardrail
-    (spec 4: Order Timeout), and detects fills on the rest (via a position-quantity
-    increase -- see broker_mcp_client's module docstring for why), placing the
-    paired sell immediately on fill.
+    """Runs every poll cycle: detects fills (via a position-quantity increase -- see
+    broker_mcp_client's module docstring for why), placing the paired sell
+    immediately on fill, and cancels unfilled BUY orders past the timeout guardrail
+    (spec 4: Order Timeout).
+
+    Fill is checked BEFORE timeout, not after: an order that fills right around its
+    timeout deadline must never reach the cancel call below -- cancelling an
+    already-filled order gets rejected by the broker (raises, per
+    broker_mcp_client.unwrap_tool_result's is_error check) and, more importantly,
+    would leave a real filled position marked TIMED_OUT/CANCELLED in our own DB.
+
+    Each order is isolated in its own try/except: one order's broker error (a
+    rejected cancel, a network blip) must not abort the rest of the sweep, and
+    since this whole function runs inside one shared session_scope() transaction
+    (see run_order_management_sweep), an uncaught exception here would roll back
+    every other ticker's already-processed updates from this same tick too, not
+    just the failing one.
     """
     notifier = notifier or _NULL_NOTIFIER
     pending_buys = await repo.get_open_orders(session, side=OrderSide.BUY)
     for order in pending_buys:
-        if is_order_timed_out(order.submitted_at, now, order_timeout_minutes):
-            if order.broker_order_id:
-                await broker.cancel_order(order.broker_order_id)
-            await repo.update_order_status(
-                session, order.id, OrderStatus.TIMED_OUT, cancelled_at=now
-            )
-            logger.info("Cancelled timed-out BUY order %s for %s", order.id, order.ticker)
-            continue
+        try:
+            position_qty = await broker.get_open_position_quantity(order.ticker)
+            if position_qty >= float(order.quantity):
+                await _mark_order_filled(session, order, float(order.limit_price), notifier)
+                trade = await session.get(Trade, order.trade_id)
+                if trade is not None:
+                    await _place_paired_sell(session, broker, order, trade, notifier)
+                continue
 
-        position_qty = await broker.get_open_position_quantity(order.ticker)
-        if position_qty >= float(order.quantity):
-            await _mark_order_filled(session, order, float(order.limit_price), notifier)
-            trade = await session.get(Trade, order.trade_id)
-            if trade is not None:
-                await _place_paired_sell(session, broker, order, trade, notifier)
+            if is_order_timed_out(order.submitted_at, now, order_timeout_minutes):
+                if order.broker_order_id:
+                    await broker.cancel_order(order.broker_order_id)
+                await repo.update_order_status(
+                    session, order.id, OrderStatus.TIMED_OUT, cancelled_at=now
+                )
+                logger.info("Cancelled timed-out BUY order %s for %s", order.id, order.ticker)
+        except Exception:
+            logger.exception(
+                "Failed processing pending BUY order %s (%s) -- will retry next sweep",
+                order.id,
+                order.ticker,
+            )
 
 
 async def poll_pending_sell_orders(
@@ -280,17 +308,58 @@ async def poll_pending_sell_orders(
     the trade, and records PnL. Not subject to the order-timeout guardrail -- that's
     a BUY-only safety valve against unfilled entries; an unfilled sell is instead
     swept up by liquidate_all_open_positions at end of day.
+
+    Each order isolated in its own try/except -- see poll_pending_buy_orders'
+    docstring for why.
     """
     notifier = notifier or _NULL_NOTIFIER
     pending_sells = await repo.get_open_orders(session, side=OrderSide.SELL)
     for order in pending_sells:
-        position_qty = await broker.get_open_position_quantity(order.ticker)
-        if position_qty <= 0:
-            trade = await session.get(Trade, order.trade_id)
-            if trade is not None:
-                await _close_trade_from_sell(
-                    session, trade, order, float(order.limit_price), notifier
-                )
+        try:
+            position_qty = await broker.get_open_position_quantity(order.ticker)
+            if position_qty <= 0:
+                trade = await session.get(Trade, order.trade_id)
+                if trade is not None:
+                    await _close_trade_from_sell(
+                        session, trade, order, float(order.limit_price), notifier
+                    )
+        except Exception:
+            logger.exception(
+                "Failed processing pending SELL order %s (%s) -- will retry next sweep",
+                order.id,
+                order.ticker,
+            )
+
+
+async def retry_missing_paired_sells(
+    session: AsyncSession, broker: BrokerExecutionClient, notifier: Notifier | None = None
+) -> None:
+    """Runs every sweep tick, after poll_pending_buy_orders: covers the case where a
+    buy fill was detected but placing its paired sell then failed (broker
+    rejection, network blip, process restart between the two calls) -- without
+    this, such a trade drops out of every other query (its buy order is no longer
+    PENDING, and it has no SELL order to be found by poll_pending_sell_orders
+    either) and would sit OPEN with a real, unmanaged position until
+    liquidate_all_open_positions force-closes it at end of day. This closes that
+    gap sooner, at the trade's actual target_sell_price rather than an EOD dump.
+    """
+    notifier = notifier or _NULL_NOTIFIER
+    for trade in await repo.get_open_trades_missing_sell_order(session):
+        buy_order = next(
+            (o for o in trade.orders if o.side == OrderSide.BUY and o.status == OrderStatus.FILLED),
+            None,
+        )
+        if buy_order is None:
+            continue  # shouldn't happen given the query's own filter; defensive only
+        try:
+            await _place_paired_sell(session, broker, buy_order, trade, notifier)
+        except Exception:
+            logger.exception(
+                "Retry: still failed to place paired sell for trade %s (%s) -- "
+                "will retry again next sweep",
+                trade.id,
+                trade.ticker,
+            )
 
 
 async def liquidate_all_open_positions(
@@ -306,36 +375,59 @@ async def liquidate_all_open_positions(
     force-sells every open position at `liquidation_prices[ticker]` (a marketable
     price -- e.g. current bid -- the caller/scheduler is responsible for fetching so
     this stays pure of market-data I/O).
+
+    Each order/trade is isolated in its own try/except -- this is the last line of
+    defense against overnight exposure (spec 4), so one ticker's broker error must
+    never stop the rest of the watchlist from being liquidated (see
+    poll_pending_buy_orders' docstring for the same reasoning).
     """
     notifier = notifier or _NULL_NOTIFIER
     for order in await repo.get_open_orders(session):
-        if order.broker_order_id:
-            await broker.cancel_order(order.broker_order_id)
-        await repo.update_order_status(session, order.id, OrderStatus.CANCELLED, cancelled_at=now)
+        try:
+            if order.broker_order_id:
+                await broker.cancel_order(order.broker_order_id)
+            await repo.update_order_status(
+                session, order.id, OrderStatus.CANCELLED, cancelled_at=now
+            )
+        except Exception:
+            logger.exception(
+                "EOD: failed to cancel order %s (%s) -- continuing with the rest "
+                "of the liquidation sweep",
+                order.id,
+                order.ticker,
+            )
 
     for trade in await repo.get_open_trades(session):
-        position_qty = await broker.get_open_position_quantity(trade.ticker)
-        if position_qty <= 0:
-            continue
-        price = liquidation_prices.get(trade.ticker)
-        if price is None:
-            logger.error(
-                "No liquidation price available for %s -- position left open at EOD sweep",
+        try:
+            position_qty = await broker.get_open_position_quantity(trade.ticker)
+            if position_qty <= 0:
+                continue
+            price = liquidation_prices.get(trade.ticker)
+            if price is None:
+                logger.error(
+                    "No liquidation price available for %s -- position left open at EOD sweep",
+                    trade.ticker,
+                )
+                continue
+            placed = await broker.place_order(
+                ticker=trade.ticker, side="sell", quantity=position_qty, limit_price=price
+            )
+            sell_order = await repo.create_order(
+                session,
+                ticker=trade.ticker,
+                side=OrderSide.SELL,
+                limit_price=price,
+                quantity=position_qty,
+                mode=mode,
+                broker_order_id=placed.broker_order_id,
+                trade_id=trade.id,
+            )
+            fill_price = placed.fill_price or price
+            await _close_trade_from_sell(session, trade, sell_order, fill_price, notifier)
+        except Exception:
+            logger.exception(
+                "EOD: failed to liquidate trade %s (%s) -- position may remain open "
+                "overnight, needs manual attention",
+                trade.id,
                 trade.ticker,
             )
-            continue
-        placed = await broker.place_order(
-            ticker=trade.ticker, side="sell", quantity=position_qty, limit_price=price
-        )
-        sell_order = await repo.create_order(
-            session,
-            ticker=trade.ticker,
-            side=OrderSide.SELL,
-            limit_price=price,
-            quantity=position_qty,
-            mode=mode,
-            broker_order_id=placed.broker_order_id,
-            trade_id=trade.id,
-        )
-        fill_price = placed.fill_price or price
-        await _close_trade_from_sell(session, trade, sell_order, fill_price, notifier)

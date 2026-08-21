@@ -240,17 +240,27 @@ async def manual_order_entry(
         realized_pnl_all = await repo.realized_pnl_today_all_tickers(
             session, settings.watchlist, today
         )
-        outcome = await om.try_enter_position(
-            session,
-            request.app.state.broker,
-            ticker=ticker,
-            decision=decision,
-            llm_decision_id=llm_decision.id,
-            settings=settings,
-            today=today,
-            realized_pnl_today_all_tickers=realized_pnl_all,
-            notifier=get_notifier(),
-        )
+        try:
+            outcome = await om.try_enter_position(
+                session,
+                request.app.state.broker,
+                ticker=ticker,
+                decision=decision,
+                llm_decision_id=llm_decision.id,
+                settings=settings,
+                today=today,
+                realized_pnl_today_all_tickers=realized_pnl_all,
+                notifier=get_notifier(),
+            )
+        except Exception as exc:
+            # Surface the real broker/MCP error instead of a bare 500 -- e.g. a
+            # rejected order (market closed, insufficient buying power, bad
+            # symbol) raises here (see broker_mcp_client.unwrap_tool_result). The
+            # whole transaction (including the llm_decision row above) rolls back
+            # via session_scope, same as any other exception raised in this block.
+            raise HTTPException(
+                status_code=502, detail=f"try_enter_position failed: {exc}"
+            ) from exc
         llm_decision.acted_on = outcome.opened
 
     return {
@@ -260,6 +270,7 @@ async def manual_order_entry(
         "reason": outcome.reason,
         "trade_id": outcome.trade_id,
         "order_id": outcome.order_id,
+        "broker_order_id": outcome.broker_order_id,
     }
 
 

@@ -90,6 +90,11 @@ async def test_manual_order_entry_opens_a_trade_in_dry_run(monkeypatch, client):
     client.app.state.broker = DryRunBrokerClient()
     config.get_settings.cache_clear()
     monkeypatch.setenv("MODE", "DRY_RUN")
+    # Isolate from whatever MAX_CAPITAL_PER_TRADE_USD the ambient .env happens to
+    # have (e.g. a deliberately tiny cap for real-money live testing) -- this test
+    # is about the entry/paired-sell/close chain, not guardrail sizing, so give it
+    # headroom regardless of local config.
+    monkeypatch.setenv("MAX_CAPITAL_PER_TRADE_USD", "10000")
     try:
         resp = await client.post(
             "/orders/manual-entry",
@@ -107,6 +112,12 @@ async def test_manual_order_entry_opens_a_trade_in_dry_run(monkeypatch, client):
         assert body["opened"] is True
         assert body["trade_id"] is not None
         assert body["order_id"] is not None
+        # trade_id/order_id are our own internal DB primary keys (different tables,
+        # not the same value) -- broker_order_id is the actual broker-side id
+        # (DryRunBrokerClient's simulated "DRYRUN-N" format here).
+        assert body["broker_order_id"] is not None
+        assert body["broker_order_id"] != body["trade_id"]
+        assert body["broker_order_id"].startswith("DRYRUN-")
 
         trades_resp = await client.get("/trades")
         trades = trades_resp.json()
@@ -144,6 +155,48 @@ async def test_manual_order_entry_in_live_mode_requires_confirm(monkeypatch, cli
         )
         assert resp.status_code == 400
         assert "confirm=true" in resp.json()["detail"]
+    finally:
+        config.get_settings.cache_clear()
+
+
+async def test_manual_order_entry_surfaces_broker_rejection_as_502(monkeypatch, client):
+    # Simulates the real failure mode this endpoint hit on 2026-08-21: the MCP
+    # rejects the order (e.g. market closed) and review_order raises -- this must
+    # come back as a clear 502 with the real reason, not a bare 500, and must not
+    # leave a dangling llm_decision row behind (session_scope rolls the whole
+    # transaction back on any exception).
+    class _RejectingBroker:
+        async def get_open_position_quantity(self, ticker: str) -> float:
+            return 0.0
+
+        async def review_order(self, **kwargs):
+            raise RuntimeError("MCP tool call failed: Market is closed for regular trading hours")
+
+        async def place_order(self, **kwargs):
+            raise AssertionError("should not be reached")
+
+        async def cancel_order(self, broker_order_id: str) -> None:
+            return None
+
+    client.app.state.broker = _RejectingBroker()
+    config.get_settings.cache_clear()
+    monkeypatch.setenv("MODE", "DRY_RUN")
+    try:
+        decisions_before = (await client.get("/decisions")).json()
+
+        resp = await client.post(
+            "/orders/manual-entry",
+            json={
+                "ticker": "CLOV",
+                "buy_limit_price": 4.11,
+                "target_sell_price": 4.20,
+            },
+        )
+        assert resp.status_code == 502
+        assert "Market is closed for regular trading hours" in resp.json()["detail"]
+
+        decisions_after = (await client.get("/decisions")).json()
+        assert decisions_after == decisions_before
     finally:
         config.get_settings.cache_clear()
 

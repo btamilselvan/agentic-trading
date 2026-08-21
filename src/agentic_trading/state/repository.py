@@ -12,6 +12,7 @@ from datetime import date, datetime
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from agentic_trading.state.models import (
     Bucket,
@@ -155,6 +156,34 @@ async def get_open_trades(session: AsyncSession, *, ticker: str | None = None) -
     if ticker is not None:
         stmt = stmt.where(Trade.ticker == ticker)
     return list((await session.scalars(stmt)).all())
+
+
+async def get_open_trades_missing_sell_order(session: AsyncSession) -> list[Trade]:
+    """OPEN trades whose buy leg has FILLED but which have no SELL order at all --
+    covers the window where `_place_paired_sell` was attempted right after a fill
+    was detected but failed (broker rejection, network blip, process restart
+    between the two calls) and nothing else would ever look at this trade again,
+    since it's no longer a PENDING buy order (get_open_orders won't return it) and
+    isn't itself a pending SELL order either. Retried every sweep tick by
+    order_manager.retry_missing_paired_sells until the paired sell finally lands.
+
+    `selectinload(Trade.orders)` eager-loads each trade's orders in the same
+    query -- necessary because the async ORM can't lazy-load a relationship
+    on demand the way the sync ORM can (accessing an unloaded relationship
+    attribute outside an awaited context raises MissingGreenlet).
+    """
+    stmt = (
+        select(Trade)
+        .options(selectinload(Trade.orders))
+        .where(Trade.status == TradeStatus.OPEN)
+    )
+    trades = list((await session.scalars(stmt)).all())
+    return [
+        trade
+        for trade in trades
+        if any(o.side == OrderSide.BUY and o.status == OrderStatus.FILLED for o in trade.orders)
+        and not any(o.side == OrderSide.SELL for o in trade.orders)
+    ]
 
 
 # --- Per-ticker daily state (guardrail bookkeeping) -----------------------------

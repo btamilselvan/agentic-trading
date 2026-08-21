@@ -219,6 +219,198 @@ async def test_poll_pending_buy_orders_detects_fill_and_places_paired_sell(db_se
     assert float(sell_orders[0].limit_price) == 102.0
 
 
+async def test_poll_pending_buy_orders_fills_instead_of_cancelling_on_timeout_race(db_session):
+    # The order is both past its timeout AND has actually filled at the broker --
+    # fill must win. Cancelling an already-filled order is wrong (and, against the
+    # real MCP, raises -- see broker_mcp_client.unwrap_tool_result's is_error check).
+    broker = FakeLaggyBroker()
+    decision_id = await _seed_decision(db_session)
+    trade = await repo.open_trade(
+        db_session,
+        ticker="AAPL",
+        trade_date=TODAY,
+        entry_price=100.0,
+        quantity=5,
+        llm_decision_id=decision_id,
+        target_sell_price=102.0,
+        max_holding_time_minutes=30,
+    )
+    order = await repo.create_order(
+        db_session,
+        ticker="AAPL",
+        side=OrderSide.BUY,
+        limit_price=100.0,
+        quantity=5,
+        mode=TradingModeEnum.DRY_RUN,
+        broker_order_id="FAKE-1",
+        trade_id=trade.id,
+    )
+    order.submitted_at = datetime(2026, 8, 17, 9, 30, tzinfo=UTC)
+    await db_session.flush()
+
+    broker.positions["AAPL"] = 5  # filled...
+    now = datetime(2026, 8, 17, 9, 46, tzinfo=UTC)  # ...16 minutes later, i.e. also timed out
+
+    await om.poll_pending_buy_orders(db_session, broker, now=now, order_timeout_minutes=15)
+
+    refreshed = await db_session.get(Order, order.id)
+    assert refreshed.status == OrderStatus.FILLED
+    assert broker.cancelled == []
+    sell_orders = await repo.get_open_orders(db_session, ticker="AAPL", side=OrderSide.SELL)
+    assert len(sell_orders) == 1
+
+
+class FlakyBroker(FakeLaggyBroker):
+    """FakeLaggyBroker that raises on get_open_position_quantity for one specific
+    ticker, to test that a sweep isolates one order's failure from the rest."""
+
+    def __init__(self, fail_ticker: str):
+        super().__init__()
+        self.fail_ticker = fail_ticker
+
+    async def get_open_position_quantity(self, ticker: str) -> float:
+        if ticker == self.fail_ticker:
+            raise RuntimeError(f"simulated broker failure for {ticker}")
+        return await super().get_open_position_quantity(ticker)
+
+
+async def test_poll_pending_buy_orders_isolates_one_orders_failure_from_the_rest(db_session):
+    broker = FlakyBroker(fail_ticker="AAPL")
+    decision_id = await _seed_decision(db_session, ticker="MSFT")
+    aapl_order = await repo.create_order(
+        db_session,
+        ticker="AAPL",
+        side=OrderSide.BUY,
+        limit_price=100.0,
+        quantity=5,
+        mode=TradingModeEnum.DRY_RUN,
+        broker_order_id="FAKE-AAPL",
+    )
+    msft_trade = await repo.open_trade(
+        db_session,
+        ticker="MSFT",
+        trade_date=TODAY,
+        entry_price=50.0,
+        quantity=2,
+        llm_decision_id=decision_id,
+        target_sell_price=51.0,
+        max_holding_time_minutes=30,
+    )
+    msft_order = await repo.create_order(
+        db_session,
+        ticker="MSFT",
+        side=OrderSide.BUY,
+        limit_price=50.0,
+        quantity=2,
+        mode=TradingModeEnum.DRY_RUN,
+        broker_order_id="FAKE-MSFT",
+        trade_id=msft_trade.id,
+    )
+    for order in (aapl_order, msft_order):
+        order.submitted_at = datetime(2026, 8, 17, 9, 30, tzinfo=UTC)
+    await db_session.flush()
+
+    broker.positions["MSFT"] = 2  # MSFT filled; AAPL's check raises instead
+
+    now = datetime(2026, 8, 17, 9, 32, tzinfo=UTC)
+    # must not raise, despite AAPL's broker call throwing
+    await om.poll_pending_buy_orders(db_session, broker, now=now, order_timeout_minutes=15)
+
+    refreshed_aapl = await db_session.get(Order, aapl_order.id)
+    assert refreshed_aapl.status == OrderStatus.PENDING  # untouched, will retry next sweep
+    refreshed_msft = await db_session.get(Order, msft_order.id)
+    assert refreshed_msft.status == OrderStatus.FILLED
+    sell_orders = await repo.get_open_orders(db_session, ticker="MSFT", side=OrderSide.SELL)
+    assert len(sell_orders) == 1
+
+
+async def test_retry_missing_paired_sells_places_the_sell_for_a_filled_buy_missing_one(
+    db_session,
+):
+    # Simulates _place_paired_sell having failed right after the fill was detected:
+    # buy order is FILLED, trade is OPEN, but no SELL order was ever recorded.
+    broker = FakeLaggyBroker()
+    decision_id = await _seed_decision(db_session)
+    trade = await repo.open_trade(
+        db_session,
+        ticker="AAPL",
+        trade_date=TODAY,
+        entry_price=100.0,
+        quantity=5,
+        llm_decision_id=decision_id,
+        target_sell_price=102.0,
+        max_holding_time_minutes=30,
+    )
+    order = await repo.create_order(
+        db_session,
+        ticker="AAPL",
+        side=OrderSide.BUY,
+        limit_price=100.0,
+        quantity=5,
+        mode=TradingModeEnum.DRY_RUN,
+        broker_order_id="FAKE-1",
+        trade_id=trade.id,
+    )
+    await repo.update_order_status(
+        db_session, order.id, OrderStatus.FILLED, filled_at=datetime.now(UTC), filled_price=100.0
+    )
+
+    await om.retry_missing_paired_sells(db_session, broker)
+
+    sell_orders = await repo.get_open_orders(db_session, ticker="AAPL", side=OrderSide.SELL)
+    assert len(sell_orders) == 1
+    assert float(sell_orders[0].limit_price) == 102.0
+    refreshed_trade = await db_session.get(Trade, trade.id)
+    assert refreshed_trade.status == TradeStatus.OPEN  # sell placed but not yet filled
+
+
+async def test_retry_missing_paired_sells_is_a_noop_once_a_sell_order_exists(db_session):
+    broker = FakeLaggyBroker()
+    decision_id = await _seed_decision(db_session)
+    trade = await repo.open_trade(
+        db_session,
+        ticker="AAPL",
+        trade_date=TODAY,
+        entry_price=100.0,
+        quantity=5,
+        llm_decision_id=decision_id,
+        target_sell_price=102.0,
+        max_holding_time_minutes=30,
+    )
+    buy_order = await repo.create_order(
+        db_session,
+        ticker="AAPL",
+        side=OrderSide.BUY,
+        limit_price=100.0,
+        quantity=5,
+        mode=TradingModeEnum.DRY_RUN,
+        broker_order_id="FAKE-1",
+        trade_id=trade.id,
+    )
+    await repo.update_order_status(
+        db_session,
+        buy_order.id,
+        OrderStatus.FILLED,
+        filled_at=datetime.now(UTC),
+        filled_price=100.0,
+    )
+    await repo.create_order(
+        db_session,
+        ticker="AAPL",
+        side=OrderSide.SELL,
+        limit_price=102.0,
+        quantity=5,
+        mode=TradingModeEnum.DRY_RUN,
+        broker_order_id="FAKE-2",
+        trade_id=trade.id,
+    )
+
+    await om.retry_missing_paired_sells(db_session, broker)
+
+    sell_orders = await repo.get_open_orders(db_session, ticker="AAPL", side=OrderSide.SELL)
+    assert len(sell_orders) == 1  # no duplicate sell placed
+
+
 async def test_poll_pending_sell_orders_closes_trade_on_exit(db_session):
     broker = FakeLaggyBroker()
     decision_id = await _seed_decision(db_session)
@@ -295,3 +487,76 @@ async def test_liquidate_all_open_positions_force_sells_and_cancels_pending(db_s
 
     refreshed_stale = await db_session.get(Order, stale_order.id)
     assert refreshed_stale.status == OrderStatus.CANCELLED
+
+
+class PartiallyFailingEodBroker:
+    """Behaves like DryRunBrokerClient (instant fills) but raises for one specific
+    ticker's get_open_position_quantity call -- tests that liquidate_all_open_positions
+    isolates one ticker's broker failure from the rest of the EOD sweep (spec 4's
+    overnight-exposure guardrail must not be undermined by an unrelated ticker's error).
+    """
+
+    def __init__(self, fail_ticker: str):
+        self.fail_ticker = fail_ticker
+        self.positions: dict[str, float] = {}
+        self._next_id = 1
+
+    async def get_open_position_quantity(self, ticker: str) -> float:
+        if ticker == self.fail_ticker:
+            raise RuntimeError(f"simulated broker failure for {ticker}")
+        return self.positions.get(ticker, 0.0)
+
+    async def review_order(self, **kwargs) -> OrderReview:
+        return OrderReview(warnings=[], estimated_price=kwargs.get("limit_price"))
+
+    async def place_order(self, *, ticker, side, quantity, limit_price) -> PlacedOrder:
+        order_id = f"EOD-{self._next_id}"
+        self._next_id += 1
+        return PlacedOrder(broker_order_id=order_id, status="filled", fill_price=limit_price)
+
+    async def cancel_order(self, broker_order_id: str) -> None:
+        return None
+
+
+async def test_liquidate_all_open_positions_isolates_one_tickers_failure_from_the_rest(
+    db_session,
+):
+    broker = PartiallyFailingEodBroker(fail_ticker="AAPL")
+    broker.positions["MSFT"] = 2
+    decision_id = await _seed_decision(db_session, ticker="AAPL")
+    aapl_trade = await repo.open_trade(
+        db_session,
+        ticker="AAPL",
+        trade_date=TODAY,
+        entry_price=100.0,
+        quantity=5,
+        llm_decision_id=decision_id,
+        target_sell_price=102.0,
+        max_holding_time_minutes=30,
+    )
+    msft_decision_id = await _seed_decision(db_session, ticker="MSFT")
+    msft_trade = await repo.open_trade(
+        db_session,
+        ticker="MSFT",
+        trade_date=TODAY,
+        entry_price=50.0,
+        quantity=2,
+        llm_decision_id=msft_decision_id,
+        target_sell_price=51.0,
+        max_holding_time_minutes=30,
+    )
+
+    now = datetime(2026, 8, 17, 15, 45, tzinfo=UTC)
+    await om.liquidate_all_open_positions(  # must not raise
+        db_session,
+        broker,
+        now=now,
+        liquidation_prices={"AAPL": 99.5, "MSFT": 50.5},
+        mode=TradingModeEnum.DRY_RUN,
+    )
+
+    refreshed_aapl = await db_session.get(Trade, aapl_trade.id)
+    assert refreshed_aapl.status == TradeStatus.OPEN  # untouched -- broker call failed
+    refreshed_msft = await db_session.get(Trade, msft_trade.id)
+    assert refreshed_msft.status == TradeStatus.CLOSED
+    assert float(refreshed_msft.exit_price) == 50.5

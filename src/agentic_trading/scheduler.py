@@ -359,6 +359,10 @@ async def run_order_management_sweep(
 ) -> None:
     """Runs between poll cycles too (fills can happen anytime, not just at the
     5-minute mark): detects buy/sell fills and enforces the order-timeout guardrail.
+
+    retry_missing_paired_sells runs after poll_pending_buy_orders on every tick too
+    -- covers a buy fill whose paired sell placement failed (see that function's
+    docstring), so it doesn't sit unmanaged until EOD liquidation.
     """
     settings = settings or get_settings()
     notifier = notifier or get_notifier()
@@ -372,6 +376,7 @@ async def run_order_management_sweep(
             notifier=notifier,
         )
         await om.poll_pending_sell_orders(session, broker, notifier=notifier)
+        await om.retry_missing_paired_sells(session, broker, notifier=notifier)
 
 
 async def run_eod_liquidation(

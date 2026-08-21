@@ -20,7 +20,7 @@ from agentic_trading.llm.base import get_llm_client
 from agentic_trading.scheduler import build_scheduler
 
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=logging.INFO,
     # include thread id
     format="%(asctime)s [%(levelname)s] [%(filename)s %(lineno)d] [Thread-%(thread)d] %(message)s",
     handlers=[

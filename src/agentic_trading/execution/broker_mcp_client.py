@@ -16,12 +16,20 @@ see scripts/bootstrap_mcp_oauth.py / api/robinhood_oauth.py):
   - Tool responses are wrapped as {"data": ..., "guide": "<agent-facing prose>"} --
     confirmed for get_accounts and get_equity_positions.
 
-NOT YET CONFIRMED: place_equity_order's response shape (i.e. which key holds the
-order id/status/fill price) -- placing a real order requires spending real money in
-the funded Agentic account, which wasn't something to do without explicit
-authorization. `place_order` below fails loudly with the actual response keys if its
-guessed field names (`order_id`, `status`, `fill_price`) turn out to be wrong, rather
-than silently mis-parsing.
+CONFIRMED against the live server on 2026-08-21 (a real order placed in the funded
+Agentic account -- CLOV, 1 share, $4.11 limit):
+  - place_equity_order's response, after the {"data": ..., "guide": ...} envelope,
+    has one MORE level of nesting: {"order": {...}} -- not the flat order dict
+    originally guessed. The order dict's id is under `id` (a UUID string, not
+    `order_id`); its lifecycle state is under `state` (observed: "unconfirmed"
+    immediately after placement -- NOT "filled"; real orders fill asynchronously,
+    unlike DryRunBrokerClient's instant simulated fill), and its price is under
+    `average_price` (decimal string, null until actually filled).
+  - `place_order` unwraps `data["order"]` (falling back to `data` itself if some
+    other tool/response doesn't nest this way) before reading `id`/`state`/
+    `average_price`, and still fails loudly with the real keys it saw if `id` is
+    missing -- same "don't silently mis-parse" posture as before, now with a
+    confirmed shape to check against instead of a guess.
 
 Fill detection deliberately does NOT depend on an order-status tool name: order_manager
 detects fills by polling `get_open_position_quantity` for an increase, which only
@@ -78,6 +86,14 @@ def _to_amount_string(value: float) -> str:
     doing float arithmetic on prices/quantities in the first place.
     """
     return format(Decimal(str(value)), "f")
+
+
+def _parse_price(value: Any) -> float | None:
+    """Reverse of `_to_amount_string` for reading order-tool responses back: price
+    fields (`average_price`, etc.) come back as decimal strings, or null when not
+    yet applicable (e.g. an unfilled order has no average_price yet).
+    """
+    return float(value) if value is not None else None
 
 
 class FileTokenStorage(TokenStorage):
@@ -243,7 +259,20 @@ def unwrap_tool_result(result) -> dict[str, Any]:
     else fall back to parsing the first text content block as JSON. Then unwrap the
     {"data": ..., "guide": "..."} envelope every tool response has been observed to
     use, falling back to the raw payload if a future/other tool doesn't wrap.
+
+    `ClientSession.call_tool` does NOT raise when a tool call fails business-logic-
+    wise (e.g. market closed, insufficient buying power, bad symbol) -- it just
+    returns a CallToolResult with `is_error=True` and the error described in prose
+    inside `content`, not JSON. Left unchecked, that prose then hits the JSON-parsing
+    fallback below and blows up with an opaque JSONDecodeError instead of the actual
+    reason -- check `is_error` first and fail loudly with the real message.
     """
+    if result.is_error:
+        message = "; ".join(
+            block.text for block in result.content if getattr(block, "type", None) == "text"
+        )
+        raise RuntimeError(f"MCP tool call failed: {message or 'no error detail returned'}")
+
     if result.structured_content:
         payload = result.structured_content
     else:
@@ -316,25 +345,32 @@ class McpBrokerClient:
                 },
             )
             data = unwrap_tool_result(result)
-            order_id = data.get("order_id") or data.get("id")
+            logger.info("Placed order %s", data)
+            # CONFIRMED 2026-08-21 (see module docstring): the order lives one level
+            # deeper than the {"data": ...} envelope, under "order".
+            order = data["order"] if isinstance(data.get("order"), dict) else data
+            order_id = order.get("id") or order.get("order_id")
             if order_id is None:
-                # See module docstring: place_equity_order's response shape is
-                # unconfirmed. Fail loudly with what we actually got rather than
-                # silently mis-record a real order.
+                # Fail loudly with what we actually got rather than silently
+                # mis-record a real order.
                 raise ValueError(
-                    "place_equity_order response has no order_id/id field -- update "
-                    f"McpBrokerClient.place_order's parsing; got keys: {list(data.keys())}"
+                    "place_equity_order response has no order.id/order_id field -- "
+                    f"update McpBrokerClient.place_order's parsing; got keys: {list(order.keys())}"
                 )
             return PlacedOrder(
                 broker_order_id=str(order_id),
-                status=str(data.get("status", "pending")),
-                fill_price=data.get("fill_price") or data.get("average_price"),
+                status=str(order.get("state") or order.get("status", "pending")),
+                fill_price=_parse_price(order.get("average_price") or order.get("fill_price")),
             )
 
     async def cancel_order(self, broker_order_id: str) -> None:
         account_number = _require_account_number()
         async with open_mcp_session() as session:
-            await session.call_tool(
+            result = await session.call_tool(
                 _TOOL_NAMES["cancel_order"],
                 {"account_number": account_number, "order_id": broker_order_id},
             )
+            # Same is_error check as every other tool call -- previously discarded
+            # unchecked, so a rejected cancel (e.g. already filled/already cancelled)
+            # silently looked like a success.
+            unwrap_tool_result(result)
