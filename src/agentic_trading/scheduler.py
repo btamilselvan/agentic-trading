@@ -109,11 +109,7 @@ async def _get_market_context(settings: Settings) -> MarketContext | None:
 
 
 async def _realized_pnl_today_all_tickers(session, today) -> float:
-    total = 0.0
-    for ticker in get_settings().watchlist:
-        state = await repo.get_or_create_daily_state(session, ticker, today)
-        total += float(state.realized_pnl or 0)
-    return total
+    return await repo.realized_pnl_today_all_tickers(session, get_settings().watchlist, today)
 
 
 async def _poll_ticker(

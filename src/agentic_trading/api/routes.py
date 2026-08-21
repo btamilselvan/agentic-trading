@@ -11,17 +11,23 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import asdict
+from datetime import UTC, datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from agentic_trading.config import get_settings
+from agentic_trading.alerts.base import get_notifier
+from agentic_trading.config import TradingMode, get_settings
+from agentic_trading.execution import order_manager as om
 from agentic_trading.execution.broker_mcp_client import McpBrokerClient
+from agentic_trading.llm.schema import TradeDecision
 from agentic_trading.market_data import robinhood_client as rh_market
 from agentic_trading.scheduler import run_poll_cycle
-from agentic_trading.state.db import get_session
+from agentic_trading.state import repository as repo
+from agentic_trading.state.db import get_session, session_scope
 from agentic_trading.state.models import LlmDecision, Trade
 
 router = APIRouter()
@@ -161,6 +167,100 @@ async def trigger_poll_cycle(request: Request, force: bool = False) -> dict:
         bypass_window=force,
     )
     return {"status": "completed", "watchlist": get_settings().watchlist, "forced": force}
+
+
+class ManualEntryRequest(BaseModel):
+    ticker: str
+    buy_limit_price: float = Field(gt=0)
+    target_sell_price: float = Field(gt=0)
+    max_holding_time_minutes: int = Field(gt=0, default=15)
+    confidence_score: float = Field(default=1.0, ge=0.0, le=1.0)
+    pattern_reasoning: str = "Manual test entry via POST /orders/manual-entry"
+
+
+@router.post("/orders/manual-entry")
+async def manual_order_entry(
+    request: Request, body: ManualEntryRequest, confirm: bool = False
+) -> dict:
+    """Debug/test hook: builds a synthetic BUY `TradeDecision` from the request body
+    and calls `order_manager.try_enter_position` directly, bypassing market-data
+    collection and the LLM entirely. Exists to live-test try_enter_position itself
+    (guardrails, sizing, broker calls, paired-sell placement, DB writes) against a
+    real broker connection without waiting for an actual BUY signal out of the poll
+    cycle.
+
+    Uses the SAME broker instance the scheduler uses (app.state.broker, wired in
+    main.py's lifespan) -- in MODE=LIVE that's a real McpBrokerClient, so a call here
+    CAN place a REAL order with real money if try_enter_position's guardrails allow
+    it (position cap, daily trade cap, capital limits, circuit breaker -- all
+    independently re-checked there regardless of what's passed here). Nothing here
+    validates that buy_limit_price/target_sell_price make sense against the market
+    -- that's the caller's job. Requires `?confirm=true` whenever MODE=LIVE, so a
+    routine or accidental call can't place real money by mistake; DRY_RUN/OBSERVE
+    need no confirmation since their broker is the in-memory simulator. Note this
+    deliberately bypasses OBSERVE mode's normal "zero order interaction" guarantee
+    (see scheduler._poll_ticker) -- that guarantee is about the automated poll
+    cycle, not this manual/operator-invoked debug endpoint. Refuses to run at all
+    while halted (see /kill-switch), same as /poll-cycle.
+    """
+    settings = get_settings()
+    if request.app.state.halted:
+        raise HTTPException(status_code=409, detail="Halted via kill-switch -- resume first")
+    if settings.mode == TradingMode.LIVE and not confirm:
+        raise HTTPException(
+            status_code=400,
+            detail="MODE=LIVE -- this can place a REAL order. Pass ?confirm=true to proceed.",
+        )
+
+    ticker = body.ticker.upper()
+    decision = TradeDecision(
+        decision="BUY",
+        confidence_score=body.confidence_score,
+        buy_limit_price=body.buy_limit_price,
+        target_sell_price=body.target_sell_price,
+        max_holding_time_minutes=body.max_holding_time_minutes,
+        pattern_reasoning=body.pattern_reasoning,
+    )
+    today = datetime.now(UTC).date()
+
+    async with session_scope() as session:
+        llm_decision = await repo.save_llm_decision(
+            session,
+            ticker=ticker,
+            bucket_id=None,
+            prompt="(manual entry -- no LLM prompt, see POST /orders/manual-entry)",
+            raw_response="(manual entry -- no LLM call, see POST /orders/manual-entry)",
+            decision=decision.decision,
+            confidence_score=decision.confidence_score,
+            buy_limit_price=decision.buy_limit_price,
+            target_sell_price=decision.target_sell_price,
+            max_holding_time_minutes=decision.max_holding_time_minutes,
+            pattern_reasoning=decision.pattern_reasoning,
+        )
+        realized_pnl_all = await repo.realized_pnl_today_all_tickers(
+            session, settings.watchlist, today
+        )
+        outcome = await om.try_enter_position(
+            session,
+            request.app.state.broker,
+            ticker=ticker,
+            decision=decision,
+            llm_decision_id=llm_decision.id,
+            settings=settings,
+            today=today,
+            realized_pnl_today_all_tickers=realized_pnl_all,
+            notifier=get_notifier(),
+        )
+        llm_decision.acted_on = outcome.opened
+
+    return {
+        "ticker": ticker,
+        "mode": settings.mode.value,
+        "opened": outcome.opened,
+        "reason": outcome.reason,
+        "trade_id": outcome.trade_id,
+        "order_id": outcome.order_id,
+    }
 
 
 @router.post("/kill-switch")

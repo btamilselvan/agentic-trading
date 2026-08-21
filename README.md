@@ -315,6 +315,7 @@ over real local HTTP servers (only market data is stubbed, since that needs live
 | `/decisions` | GET | Recent LLM decisions (`?limit=`) |
 | `/trades` | GET | Recent trades (`?limit=`) |
 | `/poll-cycle` | POST | Manually trigger one poll cycle across the watchlist, using the real broker/LLM client (`MODE=LIVE` can place real orders here) — `?force=true` bypasses the market-hours window; refuses to run while halted |
+| `/orders/manual-entry` | POST | Debug/test hook: directly call `order_manager.try_enter_position` with a synthetic BUY decision (`ticker`, `buy_limit_price`, `target_sell_price`, `max_holding_time_minutes`), bypassing market data + the LLM entirely — uses the real broker (`MODE=LIVE` can place real orders here, requires `?confirm=true`); refuses to run while halted |
 | `/kill-switch` | POST | Pause all scheduled jobs immediately |
 | `/resume` | POST | Resume scheduled jobs after a kill-switch |
 | `/oauth/robinhood/authorize` | GET | Start (or resume) Robinhood MCP authorization — visit in a browser; see [Going live](#going-live) Option B |

@@ -192,3 +192,18 @@ async def record_trade_closed(
     state.realized_pnl = float(state.realized_pnl or 0) + pnl
     await session.flush()
     return state
+
+
+async def realized_pnl_today_all_tickers(
+    session: AsyncSession, tickers: list[str], trade_date: date
+) -> float:
+    """Sum of realized PnL across every ticker for `trade_date` -- the daily
+    drawdown circuit breaker guardrail (spec section 4) is scoped across the whole
+    watchlist, not per-ticker, so callers checking that guardrail need this rather
+    than a single ticker's TickerDailyState.realized_pnl.
+    """
+    total = 0.0
+    for ticker in tickers:
+        state = await get_or_create_daily_state(session, ticker, trade_date)
+        total += float(state.realized_pnl or 0)
+    return total

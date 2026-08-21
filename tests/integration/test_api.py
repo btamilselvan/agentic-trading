@@ -3,6 +3,7 @@ from datetime import date
 import httpx
 import pytest
 
+from agentic_trading import config
 from agentic_trading.config import TradingMode
 from agentic_trading.main import create_app, lifespan
 from agentic_trading.state import repository as repo
@@ -17,6 +18,7 @@ async def client(db_session):
     async with lifespan(app):
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            c.app = app  # exposed so tests can inspect/override app.state (e.g. broker)
             yield c
 
 
@@ -78,6 +80,90 @@ async def test_decisions_and_trades_endpoints_reflect_db_state(client):
     assert len(trades) == 1
     assert trades[0]["status"] == "OPEN"
     assert trades[0]["entry_price"] == 100.0
+
+
+async def test_manual_order_entry_opens_a_trade_in_dry_run(monkeypatch, client):
+    from agentic_trading.execution.order_manager import DryRunBrokerClient
+
+    # Force a known-safe simulator regardless of the ambient MODE this process
+    # happened to boot with -- this test must never risk a real broker call.
+    client.app.state.broker = DryRunBrokerClient()
+    config.get_settings.cache_clear()
+    monkeypatch.setenv("MODE", "DRY_RUN")
+    try:
+        resp = await client.post(
+            "/orders/manual-entry",
+            json={
+                "ticker": "aapl",
+                "buy_limit_price": 100.0,
+                "target_sell_price": 102.0,
+                "max_holding_time_minutes": 15,
+            },
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["ticker"] == "AAPL"
+        assert body["mode"] == "DRY_RUN"
+        assert body["opened"] is True
+        assert body["trade_id"] is not None
+        assert body["order_id"] is not None
+
+        trades_resp = await client.get("/trades")
+        trades = trades_resp.json()
+        # DryRunBrokerClient fills both legs instantly, so by the time we check,
+        # try_enter_position has already placed the paired sell and closed the
+        # trade -- this exercises that whole chain, not just the initial entry.
+        assert any(
+            t["ticker"] == "AAPL"
+            and t["status"] == "CLOSED"
+            and t["entry_price"] == 100.0
+            and t["exit_price"] == 102.0
+            for t in trades
+        )
+    finally:
+        config.get_settings.cache_clear()
+
+
+async def test_manual_order_entry_in_live_mode_requires_confirm(monkeypatch, client):
+    from agentic_trading.execution.order_manager import DryRunBrokerClient
+
+    # Guardrail-under-test is the confirm gate itself, checked before any broker
+    # call -- still force a safe simulator so a regression here can never reach a
+    # real broker.
+    client.app.state.broker = DryRunBrokerClient()
+    config.get_settings.cache_clear()
+    monkeypatch.setenv("MODE", "LIVE")
+    try:
+        resp = await client.post(
+            "/orders/manual-entry",
+            json={
+                "ticker": "AAPL",
+                "buy_limit_price": 100.0,
+                "target_sell_price": 102.0,
+            },
+        )
+        assert resp.status_code == 400
+        assert "confirm=true" in resp.json()["detail"]
+    finally:
+        config.get_settings.cache_clear()
+
+
+async def test_manual_order_entry_refuses_while_halted(monkeypatch, client):
+    config.get_settings.cache_clear()
+    monkeypatch.setenv("MODE", "DRY_RUN")
+    try:
+        await client.post("/kill-switch")
+        resp = await client.post(
+            "/orders/manual-entry",
+            json={
+                "ticker": "AAPL",
+                "buy_limit_price": 100.0,
+                "target_sell_price": 102.0,
+            },
+        )
+        assert resp.status_code == 409
+    finally:
+        config.get_settings.cache_clear()
 
 
 async def test_kill_switch_halts_and_resume_restarts(client):
