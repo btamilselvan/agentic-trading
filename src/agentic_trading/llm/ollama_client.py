@@ -7,7 +7,10 @@ switching between them is purely a `ollama_host`/`ollama_api_key` settings chang
 see config.py. Uses Ollama's structured-output support (`format` set to the
 TradeDecision JSON schema) so the model is constrained to emit a parseable
 response. Still retries on malformed/invalid output since structured-output
-constraints aren't a hard guarantee across all models.
+constraints aren't a hard guarantee across all models -- confirmed live:
+gemma4:31b on Ollama Cloud wraps its otherwise-valid JSON in a ```json fence
+even under the `format` constraint (a local gemma daemon does not); see
+`_strip_markdown_fence`.
 """
 
 from __future__ import annotations
@@ -29,14 +32,39 @@ class LLMDecisionError(Exception):
     """Raised when no valid TradeDecision could be obtained after all retries."""
 
 
+def _strip_markdown_fence(text: str) -> str:
+    """Some models (observed: gemma4:31b on Ollama Cloud) wrap structured-output JSON
+    in a ```json ... ``` fence despite the `format` constraint, even though the same
+    request against a local Ollama daemon returns bare JSON. Strip one if present;
+    a no-op on already-bare JSON."""
+    stripped = text.strip()
+    if not stripped.startswith("```"):
+        return stripped
+    first_newline = stripped.find("\n")
+    stripped = stripped[first_newline + 1 :] if first_newline != -1 else stripped[3:]
+    if stripped.endswith("```"):
+        stripped = stripped[:-3]
+    return stripped.strip()
+
+
+_UNSET: str | None = "__unset__"  # sentinel distinct from None, which is a valid api_key override
+
+
 class OllamaClient:
     def __init__(
-        self, host: str | None = None, model: str | None = None, api_key: str | None = None
+        self,
+        host: str | None = None,
+        model: str | None = None,
+        api_key: str | None = _UNSET,
     ):
         settings = get_settings()
         self.host = host or settings.ollama_host
         self.model = model or settings.llm_model
-        self.api_key = api_key if api_key is not None else settings.ollama_api_key
+        # api_key=None must mean "explicitly no auth" (e.g. tests), distinct from the
+        # argument being omitted entirely (defer to settings.ollama_api_key) -- a plain
+        # `api_key or settings...` default can't tell those apart, since None and "not
+        # passed" would otherwise collapse to the same fallback.
+        self.api_key = settings.ollama_api_key if api_key is _UNSET else api_key
         self.timeout = settings.llm_request_timeout_seconds
         self.max_retries = settings.llm_max_retries
         self.temperature = settings.llm_temperature
@@ -67,7 +95,7 @@ class OllamaClient:
                     )
                     response.raise_for_status()
                     raw_text = response.json()["message"]["content"]
-                    decision = TradeDecision.model_validate_json(raw_text)
+                    decision = TradeDecision.model_validate_json(_strip_markdown_fence(raw_text))
                     return decision, prompt, raw_text
                 except (httpx.HTTPError, KeyError, ValueError) as exc:
                     last_error = exc

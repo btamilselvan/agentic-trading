@@ -89,3 +89,19 @@ async def test_decide_omits_auth_header_when_no_api_key():
     await client.decide("AAPL", [], TickerState(0, 0, 0.0))
 
     assert "Authorization" not in route.calls.last.request.headers
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_decide_strips_markdown_fence_around_json():
+    # Observed live from gemma4:31b on Ollama Cloud: valid JSON wrapped in a
+    # ```json fence despite the `format` structured-output constraint.
+    fenced = f"```json\n{_VALID_DECISION_JSON}\n```"
+    respx.post("http://ollama.local/api/chat").mock(return_value=_chat_response(fenced))
+    client = OllamaClient(host="http://ollama.local", model="gemma4:31b", api_key=None)
+
+    decision, _, raw = await client.decide("AAPL", [], TickerState(0, 0, 0.0))
+
+    assert decision.decision == "BUY"
+    # raw_text preserves exactly what the model returned, fence and all, for the audit trail.
+    assert raw == fenced
