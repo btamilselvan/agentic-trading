@@ -53,6 +53,9 @@ class Settings(BaseSettings):
     ollama_host: str = "http://localhost:11434"
     llm_request_timeout_seconds: float = 60.0
     llm_max_retries: int = 2
+    # 0.0 for deterministic, repeatable trade decisions -- this is a trading agent, not a
+    # creative one, so we don't want sampling variance changing BUY/HOLD calls run to run.
+    llm_temperature: float = 0.0
 
     # --- Robinhood market data (robin_stocks) ---------------------------
     robinhood_username: str | None = None

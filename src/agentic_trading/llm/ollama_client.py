@@ -32,6 +32,7 @@ class OllamaClient:
         self.model = model or settings.llm_model
         self.timeout = settings.llm_request_timeout_seconds
         self.max_retries = settings.llm_max_retries
+        self.temperature = settings.llm_temperature
 
     async def decide(
         self, ticker: str, bucket_history: Sequence[BucketLike], ticker_state: TickerState
@@ -52,6 +53,7 @@ class OllamaClient:
                             "prompt": prompt,
                             "stream": False,
                             "format": TradeDecision.model_json_schema(),
+                            "options": {"temperature": self.temperature},
                         },
                     )
                     response.raise_for_status()
