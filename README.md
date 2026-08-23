@@ -5,8 +5,9 @@ An autonomous intraday momentum trading service for Robinhood. It polls market m
 pattern decisions, and executes paired buy→sell limit orders within a set of hard safety guardrails —
 entering and exiting positions within the same trading session only.
 
-See [`requirements.md`](requirements.md) for the full product spec and [`CLAUDE.md`](CLAUDE.md) for an
-architecture tour of the codebase.
+See [`requirements.md`](requirements.md) for the full product spec, [`CLAUDE.md`](CLAUDE.md) for an
+architecture tour of the codebase, and [`docs/architecture.html`](docs/architecture.html) for system,
+component, logical, and deployment architecture diagrams.
 
 > ⚠️ **This system places real orders with real money when `MODE=LIVE`.** Always validate a change in
 > `MODE=DRY_RUN` first (the default). See [Going live](#going-live) before ever flipping the switch.

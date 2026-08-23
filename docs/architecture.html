@@ -1,0 +1,474 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agentic Trading — Architecture Diagrams</title>
+<style>
+  :root{
+    --paper:#eef1ee;
+    --panel:#ffffff;
+    --ink:#1b2420;
+    --ink-soft:#4b554e;
+    --line:#c7cec8;
+    --brass:#96701f;
+    --brass-ink:#5f4614;
+    --ext:#7a4a33;
+    --extbg:#f3e7df;
+    --core:#20463f;
+    --corebg:#dce9e5;
+    --store:#2b3b5c;
+    --storebg:#dfe4f0;
+    --code-bg:#e7ebe6;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{
+      --paper:#151a17;
+      --panel:#1d2420;
+      --ink:#e7ece7;
+      --ink-soft:#a9b3ac;
+      --line:#3a453d;
+      --brass:#d1a13f;
+      --brass-ink:#e6c273;
+      --ext:#d99a7b;
+      --extbg:#3a2a20;
+      --core:#7fc9b8;
+      --corebg:#1e332e;
+      --store:#9fb0e0;
+      --storebg:#22273a;
+      --code-bg:#232b25;
+    }
+  }
+  :root[data-theme="dark"]{
+    --paper:#151a17; --panel:#1d2420; --ink:#e7ece7; --ink-soft:#a9b3ac; --line:#3a453d;
+    --brass:#d1a13f; --brass-ink:#e6c273; --ext:#d99a7b; --extbg:#3a2a20;
+    --core:#7fc9b8; --corebg:#1e332e; --store:#9fb0e0; --storebg:#22273a; --code-bg:#232b25;
+  }
+  :root[data-theme="light"]{
+    --paper:#eef1ee; --panel:#ffffff; --ink:#1b2420; --ink-soft:#4b554e; --line:#c7cec8;
+    --brass:#96701f; --brass-ink:#5f4614; --ext:#7a4a33; --extbg:#f3e7df;
+    --core:#20463f; --corebg:#dce9e5; --store:#2b3b5c; --storebg:#dfe4f0; --code-bg:#e7ebe6;
+  }
+
+  *{box-sizing:border-box;}
+  body{
+    margin:0;
+    background:var(--paper);
+    color:var(--ink);
+    font-family: ui-serif, Georgia, "Iowan Old Style", "Palatino Linotype", serif;
+    line-height:1.6;
+  }
+  .mono{
+    font-family: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+  }
+  .wrap{
+    max-width: 920px;
+    margin: 0 auto;
+    padding: 4.5rem 1.5rem 6rem;
+  }
+  header.masthead{
+    border-bottom: 1px solid var(--line);
+    padding-bottom: 2rem;
+    margin-bottom: 3rem;
+  }
+  .eyebrow{
+    font-family: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+    font-size: 0.72rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--brass-ink);
+    display:flex;
+    align-items:center;
+    gap: 0.6rem;
+  }
+  .eyebrow::before{
+    content:"";
+    width: 1.6rem; height: 1px;
+    background: var(--brass);
+    display:inline-block;
+  }
+  h1{
+    font-size: clamp(1.9rem, 3.4vw, 2.5rem);
+    margin: 0.8rem 0 0.6rem;
+    text-wrap: balance;
+    letter-spacing: -0.01em;
+  }
+  .lede{
+    color: var(--ink-soft);
+    max-width: 62ch;
+    font-size: 1.05rem;
+  }
+  .lede code{
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    background: var(--code-bg);
+    padding: 0.05em 0.35em;
+    border-radius: 3px;
+    font-size: 0.88em;
+  }
+
+  section.diagram{
+    margin-bottom: 4.5rem;
+  }
+  section.diagram .num{
+    font-family: ui-monospace, monospace;
+    font-size: 0.72rem;
+    color: var(--ink-soft);
+    letter-spacing: 0.1em;
+  }
+  section.diagram h2{
+    font-size: 1.5rem;
+    margin: 0.3rem 0 0.4rem;
+    text-wrap: balance;
+  }
+  section.diagram .dek{
+    color: var(--ink-soft);
+    max-width: 68ch;
+    margin-bottom: 1.4rem;
+  }
+  section.diagram .dek code{
+    font-family: ui-monospace, Menlo, Consolas, monospace;
+    background: var(--code-bg);
+    padding: 0.05em 0.35em;
+    border-radius: 3px;
+    font-size: 0.88em;
+  }
+
+  .panel{
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 1.4rem;
+    overflow-x: auto;
+  }
+  .panel .mermaid{
+    min-width: 640px;
+  }
+  figcaption{
+    margin-top: 0.9rem;
+    font-family: ui-monospace, monospace;
+    font-size: 0.78rem;
+    color: var(--ink-soft);
+    letter-spacing: 0.02em;
+  }
+
+  .legend{
+    display:flex;
+    flex-wrap:wrap;
+    gap: 0.5rem 1.4rem;
+    margin: 1rem 0 1.8rem;
+    font-family: ui-monospace, monospace;
+    font-size: 0.74rem;
+    color: var(--ink-soft);
+    letter-spacing: 0.03em;
+  }
+  .legend .swatch{
+    display:inline-flex;
+    align-items:center;
+    gap: 0.45rem;
+  }
+  .legend .dot{
+    width: 0.7rem; height: 0.7rem;
+    border-radius: 2px;
+    display:inline-block;
+    border: 1px solid var(--line);
+  }
+
+  footer{
+    border-top: 1px solid var(--line);
+    padding-top: 1.5rem;
+    color: var(--ink-soft);
+    font-size: 0.85rem;
+  }
+  footer .mono{ font-size: 0.78rem; }
+
+  @media (prefers-reduced-motion: no-preference){
+    section.diagram{ animation: rise 0.5s ease-out both; }
+    section.diagram:nth-of-type(2){ animation-delay: 0.05s; }
+    section.diagram:nth-of-type(3){ animation-delay: 0.1s; }
+    section.diagram:nth-of-type(4){ animation-delay: 0.15s; }
+    @keyframes rise{
+      from{ opacity:0; transform: translateY(8px); }
+      to{ opacity:1; transform: translateY(0); }
+    }
+  }
+</style>
+</head>
+<body>
+
+<div class="wrap">
+
+  <header class="masthead">
+    <div class="eyebrow">agentic-trading &middot; system schematics</div>
+    <h1>Component, Logical &amp; Deployment Architecture</h1>
+    <p class="lede">
+      Four views of the same intraday momentum service: the system in its operating context, the
+      modules that make up the codebase, the flow of data and decisions through it each poll cycle,
+      and where each piece actually runs — from the <code>uv run uvicorn</code> app process out to
+      Robinhood, Ollama, and Supabase.
+    </p>
+  </header>
+
+  <section class="diagram">
+    <div class="num">01 / 04</div>
+    <h2>System architecture</h2>
+    <p class="dek">
+      The service as one bounded system: what it's for, who touches it, and which outside systems
+      it depends on. No file names here — this is the level a new team member or an auditor would
+      want before opening a single module, per the capability grouping <code>CLAUDE.md</code> describes.
+    </p>
+    <div class="legend">
+      <span class="swatch"><span class="dot" style="background:#f2e6c9;border-color:#96701f;"></span>operator</span>
+      <span class="swatch"><span class="dot" style="background:var(--corebg);border-color:var(--core);"></span>agentic trading service</span>
+      <span class="swatch"><span class="dot" style="background:var(--extbg);border-color:var(--ext);"></span>external system</span>
+      <span class="swatch"><span class="dot" style="background:var(--storebg);border-color:var(--store);"></span>managed data store</span>
+    </div>
+    <figure class="panel">
+      <pre class="mermaid">
+flowchart TB
+    classDef core fill:#dce9e5,stroke:#20463f,color:#20463f,stroke-width:1.2px;
+    classDef store fill:#dfe4f0,stroke:#2b3b5c,color:#2b3b5c,stroke-width:1.2px;
+    classDef ext fill:#f3e7df,stroke:#7a4a33,color:#7a4a33,stroke-width:1.2px;
+    classDef person fill:#f2e6c9,stroke:#96701f,color:#5f4614,stroke-width:1.2px;
+
+    OPERATOR(["Operator<br/><span style='font-size:11px'>sets MODE, watchlist, guardrail limits;<br/>runs the one-time OAuth link</span>"]):::person
+
+    subgraph SYS["Agentic Trading Service"]
+        direction TB
+        POLL["Market Microstructure Polling<br/><span style='font-size:11px'>5-min bucketed bars, quotes, RSI</span>"]
+        DECIDE["Momentum Decision Engine<br/><span style='font-size:11px'>LLM-backed BUY / HOLD, per-ticker</span>"]
+        EXECN["Guardrailed Order Execution<br/><span style='font-size:11px'>paired buy→sell, same-session only</span>"]
+        LEDGER["Position &amp; Trade Ledger<br/><span style='font-size:11px'>the durable record of what happened</span>"]
+        ALERT["Alerting"]
+
+        POLL --> DECIDE --> EXECN --> LEDGER
+        DECIDE --> ALERT
+        EXECN --> ALERT
+    end
+    class SYS core
+
+    LLM_SVC["Local LLM<br/>Ollama (gemma)"]:::ext
+    RH_DATA["Robinhood<br/>(unofficial, market data)"]:::ext
+    RH_TRADE["Robinhood Trading MCP<br/>(brokerage, order placement)"]:::ext
+    CHAT["Team chat<br/>Slack / Discord / Telegram"]:::ext
+    DB1[("Supabase Postgres<br/>trades, orders, buckets")]:::store
+
+    OPERATOR -->|"configure &amp; one-time OAuth"| SYS
+    POLL -->|"poll bars &amp; quotes"| RH_DATA
+    DECIDE <-->|"prompt in / TradeDecision out"| LLM_SVC
+    EXECN -->|"review / place / cancel orders,<br/>read positions"| RH_TRADE
+    LEDGER <-->|"read / write state"| DB1
+    ALERT -->|"BUY signal, fill, trade close"| CHAT
+      </pre>
+      <figcaption>fig. 1 — system context: capabilities, not files; every arrow crossing the boundary is a real network call</figcaption>
+    </figure>
+  </section>
+
+  <section class="diagram">
+    <div class="num">02 / 04</div>
+    <h2>Component architecture</h2>
+    <p class="dek">
+      Package boundaries under <code>src/agentic_trading/</code>. Both the LLM backend and the
+      database sit behind small interfaces (<code>llm/base.py</code>, <code>state/repository.py</code>)
+      specifically so they're swappable without touching callers; <code>execution/</code> is split
+      between the two brokerage integrations described in <code>CLAUDE.md</code>.
+    </p>
+    <div class="legend">
+      <span class="swatch"><span class="dot" style="background:var(--corebg);border-color:var(--core);"></span>orchestration</span>
+      <span class="swatch"><span class="dot" style="background:var(--storebg);border-color:var(--store);"></span>persistence</span>
+      <span class="swatch"><span class="dot" style="background:var(--extbg);border-color:var(--ext);"></span>external boundary</span>
+    </div>
+    <figure class="panel">
+      <pre class="mermaid">
+graph TB
+    classDef core fill:#dce9e5,stroke:#20463f,color:#20463f,stroke-width:1.2px;
+    classDef store fill:#dfe4f0,stroke:#2b3b5c,color:#2b3b5c,stroke-width:1.2px;
+    classDef ext fill:#f3e7df,stroke:#7a4a33,color:#7a4a33,stroke-width:1.2px;
+
+    MAIN["main.py<br/><span style='font-size:11px'>FastAPI app + broker selection by MODE</span>"]:::core
+    SCHED["scheduler.py<br/><span style='font-size:11px'>APScheduler: poll / order-mgmt / EOD jobs</span>"]:::core
+    API["api/<br/>routes.py, robinhood_oauth.py"]:::core
+
+    subgraph MD["market_data/"]
+        RHC["robinhood_client.py<br/><span style='font-size:11px'>robin_stocks polling</span>"]
+        BB["bucket_builder.py<br/><span style='font-size:11px'>MetricBucket construction</span>"]
+    end
+
+    subgraph LLM["llm/"]
+        PROMPT["prompt.py"]
+        SCHEMA["schema.py<br/><span style='font-size:11px'>TradeDecision contract</span>"]
+        LBASE["base.py<br/><span style='font-size:11px'>LLMClient protocol</span>"]
+        OLLAMA["ollama_client.py"]
+    end
+
+    subgraph EXEC["execution/"]
+        GUARD["guardrails.py<br/><span style='font-size:11px'>pure safety functions</span>"]
+        OM["order_manager.py<br/><span style='font-size:11px'>+ DryRunBrokerClient</span>"]
+        MCP["broker_mcp_client.py<br/><span style='font-size:11px'>McpBrokerClient</span>"]
+    end
+
+    subgraph ST["state/"]
+        REPO["repository.py<br/><span style='font-size:11px'>only module touching ORM sessions</span>"]
+        MODELS["models.py"]
+        DB["db.py<br/><span style='font-size:11px'>lru_cache'd engine/session factory</span>"]
+    end
+
+    ALERTS["alerts/<br/>Notifier protocol, WebhookNotifier, NullNotifier"]:::core
+
+    ROBINHOOD_MCP["Robinhood Trading MCP<br/>(agent.robinhood.com)"]:::ext
+    ROBINHOOD_RS["Robinhood (unofficial)<br/>via robin_stocks"]:::ext
+    OLLAMA_SVC["Ollama runtime<br/>(gemma model)"]:::ext
+    PG[("Postgres<br/>(Supabase-hosted)")]:::store
+    WEBHOOK["Slack / Discord / Telegram<br/>incoming webhook"]:::ext
+
+    MAIN --> SCHED
+    MAIN --> API
+    MAIN -->|MODE=LIVE| MCP
+    MAIN -->|MODE=DRY_RUN/OBSERVE| OM
+
+    SCHED --> RHC
+    RHC --> BB
+    BB --> PROMPT
+    PROMPT --> LBASE
+    LBASE -.impl.-> OLLAMA
+    SCHED --> OM
+    OM --> GUARD
+    OM --> MCP
+    OM --> REPO
+    SCHED --> REPO
+    SCHED --> ALERTS
+    API --> MCP
+    API --> RHC
+
+    REPO --> MODELS
+    REPO --> DB
+    DB --> PG
+
+    RHC --> ROBINHOOD_RS
+    MCP --> ROBINHOOD_MCP
+    OLLAMA --> OLLAMA_SVC
+    ALERTS --> WEBHOOK
+      </pre>
+      <figcaption>fig. 1 — solid arrows: direct calls · dotted: interface/implementation via get_llm_client()</figcaption>
+    </figure>
+  </section>
+
+  <section class="diagram">
+    <div class="num">03 / 04</div>
+    <h2>Logical architecture</h2>
+    <p class="dek">
+      The decision pipeline a single 5-minute poll cycle runs through, per <code>requirements.md</code>
+      §3.1/3.3 — market microstructure in, a structured BUY/HOLD decision out, guardrails re-checked
+      independently at the point of order placement rather than trusted from upstream.
+    </p>
+    <div class="legend">
+      <span class="swatch"><span class="dot" style="background:var(--corebg);border-color:var(--core);"></span>decision path</span>
+      <span class="swatch"><span class="dot" style="background:var(--extbg);border-color:var(--ext);"></span>safety gate</span>
+      <span class="swatch"><span class="dot" style="background:var(--storebg);border-color:var(--store);"></span>state / side-effect</span>
+    </div>
+    <figure class="panel">
+      <pre class="mermaid">
+flowchart LR
+    classDef core fill:#dce9e5,stroke:#20463f,color:#20463f,stroke-width:1.2px;
+    classDef gate fill:#f3e7df,stroke:#7a4a33,color:#7a4a33,stroke-width:1.2px;
+    classDef store fill:#dfe4f0,stroke:#2b3b5c,color:#2b3b5c,stroke-width:1.2px;
+
+    A["Poll market data<br/>(5-min bars, quotes, RSI)"]:::core
+    B["Build MetricBucket<br/>+ qualitative catalyst/metadata"]:::core
+    C["Assemble prompt from<br/>full intraday bucket history"]:::core
+    D["LLM decision<br/>TradeDecision: BUY / HOLD"]:::core
+    E{"Confidence above<br/>threshold?"}:::gate
+    F["Notify BUY signal"]:::store
+    G{"OBSERVE mode?"}:::gate
+    H["Evaluate buy guardrails<br/>(position cap, daily trade cap,<br/>capital limit, circuit breaker,<br/>EOD cutoff)"]:::gate
+    I["Place paired buy→sell<br/>limit orders"]:::core
+    J["Persist trade / order state"]:::store
+    K["Order-management sweep<br/>(fills, timeouts)"]:::core
+    L["EOD liquidation<br/>(same-session exit only)"]:::gate
+    M["Alert on fill / trade close"]:::store
+
+    A --> B --> C --> D --> E
+    E -- no --> A
+    E -- yes --> F --> G
+    G -- yes, stop --> A
+    G -- no --> H
+    H -- fails any check --> A
+    H -- passes --> I --> J
+    J --> K --> L --> M
+      </pre>
+      <figcaption>fig. 2 — one lane per poll cycle; guardrails are evaluated fresh, never inherited from the LLM's decision</figcaption>
+    </figure>
+  </section>
+
+  <section class="diagram">
+    <div class="num">04 / 04</div>
+    <h2>Deployment architecture</h2>
+    <p class="dek">
+      Physical topology per <code>docker-compose.yml</code> and the README's local/Docker/production
+      modes. Supabase Postgres is remote and hosted regardless of environment; Ollama runs as a sibling
+      container reachable at <code>http://ollama:11434</code> inside the compose network.
+    </p>
+    <div class="legend">
+      <span class="swatch"><span class="dot" style="background:var(--corebg);border-color:var(--core);"></span>this repo, deployed</span>
+      <span class="swatch"><span class="dot" style="background:var(--extbg);border-color:var(--ext);"></span>third-party service</span>
+      <span class="swatch"><span class="dot" style="background:var(--storebg);border-color:var(--store);"></span>managed data store</span>
+    </div>
+    <figure class="panel">
+      <pre class="mermaid">
+graph TB
+    classDef core fill:#dce9e5,stroke:#20463f,color:#20463f,stroke-width:1.2px;
+    classDef ext fill:#f3e7df,stroke:#7a4a33,color:#7a4a33,stroke-width:1.2px;
+    classDef store fill:#dfe4f0,stroke:#2b3b5c,color:#2b3b5c,stroke-width:1.2px;
+
+    subgraph HOST["Docker host (docker compose up)"]
+        direction TB
+        subgraph APPC["container: app  (built from ./Dockerfile, pip-based)"]
+            UVI["uvicorn :8000<br/>agentic_trading.main:app"]
+            SCHED2["APScheduler<br/>(in-process, same event loop)"]
+            SECRETS["./.secrets volume<br/>(OAuth token cache)"]
+        end
+        subgraph OLLC["container: ollama (ollama/ollama:latest)"]
+            OLLD["Ollama daemon :11434<br/>serves LLM_MODEL (gemma)"]
+            OVOL["ollama_data volume"]
+        end
+        UVI <-->|"http://ollama:11434"| OLLD
+        OLLD --- OVOL
+        SCHED2 --- SECRETS
+    end
+
+    OPERATOR["Operator browser<br/>(bootstrap_mcp_oauth.py or<br/>GET /oauth/robinhood/authorize)"]:::core
+    RHMCP["Robinhood Trading MCP<br/>agent.robinhood.com/mcp/trading<br/>(OAuth session, order placement)"]:::ext
+    RHWEB["robinhood.com<br/>(unofficial, robin_stocks)<br/>market data polling"]:::ext
+    SUPA[("Supabase Postgres<br/>(remote, always hosted —<br/>not part of compose)")]:::store
+    HOOK["Webhook receiver<br/>Slack / Discord / Telegram"]:::ext
+
+    UVI -->|asyncpg / SQLAlchemy async| SUPA
+    UVI -->|order placement, MODE=LIVE| RHMCP
+    UVI -->|market data + connectivity checks| RHWEB
+    UVI -->|BUY signal / fill / close alerts| HOOK
+    OPERATOR -->|one-time OAuth authorize/callback| UVI
+    UVI -->|redirect + token exchange| RHMCP
+
+    LOCAL["Local dev: uv run uvicorn --reload<br/>(no container, MODE=DRY_RUN default)"]:::core
+    LOCAL -.->|same DB/LLM/broker wiring| SUPA
+    LOCAL -.-> RHWEB
+      </pre>
+      <figcaption>fig. 3 — dashed edges: local (non-container) dev path, wired identically to the containerized app</figcaption>
+    </figure>
+  </section>
+
+  <footer>
+    <p class="mono">source of truth: CLAUDE.md, requirements.md, docker-compose.yml — regenerate this page if module boundaries or the compose topology change.</p>
+  </footer>
+
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<script>
+  mermaid.initialize({
+    startOnLoad: true,
+    theme: window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "default",
+    securityLevel: "strict",
+  });
+</script>
+</body>
+</html>
