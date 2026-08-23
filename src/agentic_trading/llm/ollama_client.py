@@ -1,9 +1,13 @@
-"""Default LLMClient implementation: a local Ollama server.
+"""Default LLMClient implementation: an Ollama server, local or cloud.
 
-Uses Ollama's structured-output support (`format` set to the TradeDecision JSON
-schema) so the model is constrained to emit a parseable response. Still retries on
-malformed/invalid output since structured-output constraints aren't a hard guarantee
-across all models.
+Uses the /api/chat endpoint (rather than /api/generate) because that's the one
+verified to work against Ollama Cloud (ollama.com) with a Bearer API key; it also
+works unchanged against a local Ollama daemon, so one code path covers both --
+switching between them is purely a `ollama_host`/`ollama_api_key` settings change,
+see config.py. Uses Ollama's structured-output support (`format` set to the
+TradeDecision JSON schema) so the model is constrained to emit a parseable
+response. Still retries on malformed/invalid output since structured-output
+constraints aren't a hard guarantee across all models.
 """
 
 from __future__ import annotations
@@ -26,10 +30,13 @@ class LLMDecisionError(Exception):
 
 
 class OllamaClient:
-    def __init__(self, host: str | None = None, model: str | None = None):
+    def __init__(
+        self, host: str | None = None, model: str | None = None, api_key: str | None = None
+    ):
         settings = get_settings()
         self.host = host or settings.ollama_host
         self.model = model or settings.llm_model
+        self.api_key = api_key if api_key is not None else settings.ollama_api_key
         self.timeout = settings.llm_request_timeout_seconds
         self.max_retries = settings.llm_max_retries
         self.temperature = settings.llm_temperature
@@ -38,26 +45,28 @@ class OllamaClient:
         self, ticker: str, bucket_history: Sequence[BucketLike], ticker_state: TickerState
     ) -> tuple[TradeDecision, str, str]:
         prompt = build_prompt(ticker, bucket_history, ticker_state)
-        
+
         logger.debug("Calling Ollama (%s) with prompt: %s", self.model, prompt)
 
+        headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
+
         last_error: Exception | None = None
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
+        async with httpx.AsyncClient(timeout=self.timeout, headers=headers) as client:
             for attempt in range(1, self.max_retries + 2):
                 raw_text = ""
                 try:
                     response = await client.post(
-                        f"{self.host}/api/generate",
+                        f"{self.host}/api/chat",
                         json={
                             "model": self.model,
-                            "prompt": prompt,
+                            "messages": [{"role": "user", "content": prompt}],
                             "stream": False,
                             "format": TradeDecision.model_json_schema(),
                             "options": {"temperature": self.temperature},
                         },
                     )
                     response.raise_for_status()
-                    raw_text = response.json()["response"]
+                    raw_text = response.json()["message"]["content"]
                     decision = TradeDecision.model_validate_json(raw_text)
                     return decision, prompt, raw_text
                 except (httpx.HTTPError, KeyError, ValueError) as exc:

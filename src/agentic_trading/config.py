@@ -50,7 +50,13 @@ class Settings(BaseSettings):
     # llm_model is provider-specific. Default is local Ollama running gemma.
     llm_provider: LlmProvider = LlmProvider.OLLAMA
     llm_model: str = "gemma4:e4b"
+    # Same Ollama API shape locally and on Ollama Cloud -- switch between them purely
+    # by settings: local default is a bare localhost daemon with no key; for Ollama
+    # Cloud, point ollama_host at https://ollama.com and set ollama_api_key (sent as
+    # a Bearer token). ollama_api_key being set is what triggers the auth header --
+    # there's no separate "mode" flag to keep in sync with the host.
     ollama_host: str = "http://localhost:11434"
+    ollama_api_key: str | None = None
     llm_request_timeout_seconds: float = 60.0
     llm_max_retries: int = 2
     # 0.0 for deterministic, repeatable trade decisions -- this is a trading agent, not a

@@ -49,13 +49,14 @@ def _run_uvicorn(app: FastAPI, port: int) -> None:
 
 @pytest.fixture(scope="module")
 def fake_ollama_server():
-    """A real HTTP server implementing just enough of Ollama's /api/generate to let
+    """A real HTTP server implementing just enough of Ollama's /api/chat to let
     the real OllamaClient run its full request/parse/validate path against it."""
     app = FastAPI()
 
-    @app.post("/api/generate")
-    async def generate(request: Request) -> dict:
+    @app.post("/api/chat")
+    async def chat(request: Request) -> dict:
         body = await request.json()
+        prompt = body["messages"][0]["content"]
         # Structured-output constraint is honored implicitly here: we return a
         # payload that always satisfies TradeDecision's schema.
         decision = {
@@ -64,9 +65,9 @@ def fake_ollama_server():
             "buy_limit_price": 100.5,
             "target_sell_price": 102.0,
             "max_holding_time_minutes": 30,
-            "pattern_reasoning": f"breakout detected for prompt of length {len(body['prompt'])}",
+            "pattern_reasoning": f"breakout detected for prompt of length {len(prompt)}",
         }
-        return {"response": json.dumps(decision)}
+        return {"message": {"role": "assistant", "content": json.dumps(decision)}}
 
     thread = threading.Thread(target=_run_uvicorn, args=(app, OLLAMA_PORT), daemon=True)
     thread.start()

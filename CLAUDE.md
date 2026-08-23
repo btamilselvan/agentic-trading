@@ -105,9 +105,13 @@ interfaces specifically so they're swappable later without touching callers.
   is approximated from top-of-book bid/ask size only — both are called out in that module's docstring,
   not silently presented as exact reads.
 - **`llm/`** — `base.py` defines the `LLMClient` protocol and `get_llm_client()` factory switched on
-  `config.llm_provider`; `ollama_client.py` is the only implementation today (local Ollama running
-  `gemma`, per `LLM_MODEL`). Add a new provider by implementing the protocol and adding one branch to
-  `get_llm_client()` — nothing else should need to change. `schema.py` holds the structured
+  `config.llm_provider`; `ollama_client.py` is the only implementation today (Ollama running `gemma`,
+  per `LLM_MODEL`; `LLM_TEMPERATURE` defaults to `0.0` for repeatable decisions). It talks to Ollama's
+  `/api/chat` endpoint, which is identical whether `OLLAMA_HOST` points at a local daemon or Ollama
+  Cloud (`https://ollama.com`) — switching between them is purely an `OLLAMA_HOST`/`OLLAMA_API_KEY`
+  settings change (the key, if set, is sent as a Bearer token), not a code change. Add a new provider
+  by implementing the protocol and adding one branch to `get_llm_client()` — nothing else should need
+  to change. `schema.py` holds the structured
   `TradeDecision` contract (spec §3.2) with validation (BUY requires a target price above the entry
   price, a holding-time limit, etc.); `prompt.py` builds the prompt from the *complete* bucket history
   for the day, per spec.
