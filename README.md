@@ -16,6 +16,7 @@ component, logical, and deployment architecture diagrams.
 
 - [Prerequisites](#prerequisites)
 - [Configuration](#configuration)
+- [LLM backend: local vs. Ollama Cloud](#llm-backend-local-vs-ollama-cloud)
 - [Run locally (no Docker)](#run-locally-no-docker)
 - [Run with Docker Compose](#run-with-docker-compose)
 - [Run in production](#run-in-production)
@@ -28,7 +29,7 @@ component, logical, and deployment architecture diagrams.
 
 | Mode | You need |
 |---|---|
-| Local | [uv](https://docs.astral.sh/uv/) (manages the Python 3.14+ install and venv for you), a Postgres database (e.g. [Supabase](https://supabase.com)), [Ollama](https://ollama.com) running locally |
+| Local | [uv](https://docs.astral.sh/uv/) (manages the Python 3.14+ install and venv for you), a Postgres database (e.g. [Supabase](https://supabase.com)), [Ollama](https://ollama.com) running locally **or** an [Ollama Cloud](https://ollama.com) API key — see [LLM backend](#llm-backend-local-vs-ollama-cloud) |
 | Docker Compose | Docker + Docker Compose, a Postgres database (remote/Supabase — not containerized here) |
 | Production | A container host/orchestrator, a production Postgres, a Robinhood account, a funded Robinhood **Agentic** account for `MODE=LIVE` |
 
@@ -91,6 +92,46 @@ There are three modes, meant to be moved through in order:
 3. **`LIVE`** — real orders through the Robinhood MCP, real money, in the isolated Agentic account. See
    [Going live](#going-live).
 
+## LLM backend: local vs. Ollama Cloud
+
+By default the app talks to a local Ollama daemon (`ollama serve`) — free, fully offline, no data leaves
+your machine. You can instead point it at [Ollama Cloud](https://ollama.com) if you want a larger model
+than your hardware can run, or don't want to keep a local Ollama process alive. Both use the exact same
+`OllamaClient` code path (`/api/chat`) — switching between them is a `.env` change, not a code change.
+
+| | Local (default) | Ollama Cloud |
+|---|---|---|
+| `.env` | `OLLAMA_HOST=http://localhost:11434`, `OLLAMA_API_KEY` unset | `OLLAMA_HOST=https://ollama.com`, `OLLAMA_API_KEY=<your key>` |
+| `LLM_MODEL` | whatever you've `ollama pull`ed (default `gemma4:e4b`) | whatever's available on Ollama Cloud (e.g. `gemma4:31b`) |
+| Needs | `ollama serve` running | an [Ollama account](https://ollama.com) with an API key generated |
+| Cost | free, offline | usage-based — check current Ollama Cloud pricing |
+
+To switch to Ollama Cloud:
+
+1. Sign in at [ollama.com](https://ollama.com) and generate an API key (Settings → API keys).
+2. Set in `.env`:
+
+   ```bash
+   OLLAMA_HOST=https://ollama.com
+   OLLAMA_API_KEY=<your key>
+   LLM_MODEL=gemma4:31b   # or whichever cloud model you want
+   ```
+
+3. Skip step 2 of [Run locally](#run-locally-no-docker) (`ollama serve` / `ollama pull`) entirely — no
+   local Ollama process is needed for LLM calls.
+
+`OLLAMA_API_KEY` being set is what triggers the `Authorization: Bearer` header on every request — there's
+no separate mode flag to keep in sync with the host. Leave it unset (and `OLLAMA_HOST` at its local
+default) to use a local daemon instead.
+
+Some cloud models (observed with `gemma4:31b`) wrap their JSON response in a Markdown code fence even
+under the structured-output `format` constraint, where a local daemon returns bare JSON for the same
+request; `OllamaClient` strips this automatically before parsing, so no extra config is needed for that.
+
+Docker Compose forces `OLLAMA_HOST` to its own local `ollama` container regardless of `.env` (see
+[Run with Docker Compose](#run-with-docker-compose)) — to use Ollama Cloud under Compose, remove that
+override from `docker-compose.yml` and keep `OLLAMA_API_KEY` set in `.env`.
+
 ## Run locally (no Docker)
 
 1. **Install `uv`** (if you don't have it) and sync the project's dependencies, including dev tools:
@@ -110,6 +151,9 @@ There are three modes, meant to be moved through in order:
    ollama serve &          # if not already running
    ollama pull gemma4:e4b  # match whatever LLM_MODEL is set to
    ```
+
+   Using [Ollama Cloud](#llm-backend-local-vs-ollama-cloud) instead? Skip this step entirely — set
+   `OLLAMA_HOST`/`OLLAMA_API_KEY` in `.env` and there's no local model to pull or serve.
 
 3. **Point `DATABASE_URL` at a real Postgres** (a free Supabase project works well) and apply migrations:
 
@@ -197,8 +241,10 @@ docker run -d \
 Production-specific points:
 
 - **LLM backend:** point `OLLAMA_HOST` at a reachable Ollama instance (a separate managed/self-hosted
-  server, or a sidecar container) — this image does not run one itself. If you'd rather use a cloud LLM
-  provider, see [Switching LLM providers](#switching-llm-providers).
+  server, or a sidecar container) — this image does not run one itself. Or use
+  [Ollama Cloud](#llm-backend-local-vs-ollama-cloud) instead so there's no Ollama instance to run/manage
+  at all — set `OLLAMA_HOST=https://ollama.com` and `OLLAMA_API_KEY`. For a non-Ollama provider entirely,
+  see [Switching LLM providers](#switching-llm-providers).
 - **Database:** use your real Postgres (Supabase or otherwise) via `DATABASE_URL`; run
   `alembic upgrade head` as a release step before starting new containers, not automatically on boot.
 - **Secrets:** `.secrets/` holds the Robinhood session pickle and the MCP OAuth token — treat it like any
@@ -278,9 +324,11 @@ Before flipping `MODE=LIVE` in `.env`:
 
 ### Switching LLM providers
 
-The default is local Ollama (`LLM_PROVIDER=ollama`, `LLM_MODEL` set to whatever you've pulled). To use a
-different provider, implement the `LLMClient` protocol in `llm/base.py` (see `llm/ollama_client.py` for
-the shape) and add one branch to `get_llm_client()` in the same file — no other module needs to change.
+The default is Ollama (`LLM_PROVIDER=ollama`), which itself supports both a local daemon and Ollama
+Cloud — see [LLM backend: local vs. Ollama Cloud](#llm-backend-local-vs-ollama-cloud) if that's all you
+need; it's a `.env` change, not a code change. To use an entirely different provider (OpenAI, Claude,
+etc.), implement the `LLMClient` protocol in `llm/base.py` (see `llm/ollama_client.py` for the shape) and
+add one branch to `get_llm_client()` in the same file — no other module needs to change.
 
 ## Running tests
 
@@ -345,7 +393,12 @@ over real local HTTP servers (only market data is stubbed, since that needs live
   Robinhood) hit `/callback` without a prior `/authorize` call in this process, or the previous flow
   already finished/timed out. Start over from `GET /oauth/robinhood/authorize`.
 - **Ollama connection refused** — confirm `ollama serve` is running and `OLLAMA_HOST` is reachable from
-  wherever the app is running (in Docker Compose, that's `http://ollama:11434`, not `localhost`).
+  wherever the app is running (in Docker Compose, that's `http://ollama:11434`, not `localhost`). If
+  you're using [Ollama Cloud](#llm-backend-local-vs-ollama-cloud), this instead means `OLLAMA_HOST` is
+  still set to a local address — check for a stale `http://localhost:11434` in `.env`.
+- **Ollama Cloud returns 401/403** — `OLLAMA_API_KEY` is missing, expired, or wrong; regenerate one at
+  [ollama.com](https://ollama.com) (Settings → API keys). A response that comes back but fails to parse
+  as a `TradeDecision` is a different problem — check the logged raw response — not an auth issue.
 - **Migrations fail against Supabase** — use the Session Pooler connection string (port `5432`, or the
   pooled `6543` variant per Supabase's docs), not a direct connection that may not be reachable from
   wherever you're running `alembic`.
