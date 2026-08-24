@@ -222,7 +222,7 @@ async def _poll_ticker(
 
         # Get insights from LLM using today's Metrics
         decision, prompt, raw = await llm_client.decide(ticker, history, ticker_state)
-        logger.debug("llm decision (%s), raw_response (%s)", decision, raw)
+        logger.info("llm decision (%s), raw_response (%s)", decision, raw)
         llm_decision = await repo.save_llm_decision(
             session,
             ticker=ticker,
