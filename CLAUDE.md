@@ -164,13 +164,17 @@ interfaces specifically so they're swappable later without touching callers.
   take their dependencies as arguments rather than importing concrete implementations, so
   `run_poll_cycle`/`run_order_management_sweep`/`run_eod_liquidation` are unit-testable with fakes;
   `build_scheduler` is the only place real dependencies get wired in. Trading-day detection is a plain
-  Mon–Fri check, not a real market-holiday calendar. `_poll_ticker` branches on
-  `config.TradingMode.OBSERVE` (Phase 1: real data + real LLM, zero order interaction of any kind) to
-  report a BUY signal via the notifier and skip `order_manager.try_enter_position` entirely rather than
-  calling it with a "don't actually trade" flag -- the broker is never touched in that mode, so it needs
-  no MCP/OAuth setup at all. `DRY_RUN` → `OBSERVE` → `LIVE` is the intended promotion path (see README's
-  "Going live"). Phase 3: `_poll_ticker` also branches on whether the ticker already has an OPEN `Trade`
-  (checked via `repo.get_open_trade_for_ticker`, *before* the entry-eligibility guardrails, since an open
+  Mon–Fri check, not a real market-holiday calendar. `_poll_ticker` has no mode-specific branch for
+  `DRY_RUN`/`PAPER_TRADING`/`LIVE` -- all three call `order_manager.try_enter_position` identically on a
+  BUY signal; the only differences between them are which `BrokerExecutionClient` `main.py`'s
+  `build_broker()` wired up (`LIVE` gets the real `McpBrokerClient`, the other two share
+  `DryRunBrokerClient`, an in-memory simulator -- no MCP/OAuth setup needed either way) and what
+  `TradingModeEnum` value gets stamped on the resulting `Order`/`Trade` rows. `DRY_RUN` → `PAPER_TRADING`
+  → `LIVE` is the intended promotion path (see README's "Going live"): `DRY_RUN` is for local/dev testing
+  at any time, `PAPER_TRADING` is meant to be run during real market hours as the final capital-free
+  rehearsal of what `LIVE` would do, tagged distinctly in the DB from `DRY_RUN` for that reason (migration
+  `0006_add_paper_trading_mode`). Phase 3: `_poll_ticker` also branches on whether the ticker already has
+  an OPEN `Trade` (checked via `repo.get_open_trade_for_ticker`, *before* the entry-eligibility guardrails, since an open
   position is exactly what makes `check_position_cap` block entry) — if so, `_manage_open_position` takes
   over: `execution.invalidation.evaluate_exit_guardrails` first (no LLM call on a forced exit), then, if
   clear, an LLM call for continuity/trailing-target, then `execution.order_manager.try_exit_position_early`

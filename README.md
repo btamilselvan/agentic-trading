@@ -88,12 +88,13 @@ There are three modes, meant to be moved through in order:
 
 1. **`DRY_RUN`** (default) — fully simulated, as above. Good for validating the pipeline itself works
    (buckets get built, the LLM gets called, orders/fills/guardrails behave) without needing real
-   Robinhood credentials for anything beyond market data.
-2. **`OBSERVE`** — real market data, real LLM decisions, but **zero order interaction of any kind**, not
-   even a simulated one. When a BUY signal clears the confidence threshold, it's alerted (webhook) and
-   recorded in `/decisions` with `acted_on: false` — nothing is ever bought or sold. This needs no MCP/
-   OAuth setup at all, since the broker's write path is never reached; it's the natural "watch it call
-   real signals for a while before trusting it with money" phase.
+   Robinhood credentials for anything beyond market data. Meant for local/dev testing at any time.
+2. **`PAPER_TRADING`** — the exact same simulated in-memory broker and order lifecycle as `DRY_RUN`
+   (real market data, real LLM decisions, simulated buy/sell fills, trailing stops, PnL — all written to
+   the DB same as a real trade), meant to be run during real market hours as the final, capital-free
+   rehearsal of what `LIVE` would actually do. Trades are tagged `PAPER_TRADING` (not `DRY_RUN`) so this
+   run's performance can be reviewed apart from ad hoc dev testing. This needs no MCP/OAuth setup at all,
+   since the broker's write path never leaves the in-memory simulator.
 3. **`LIVE`** — real orders through the Robinhood MCP, real money, in the isolated Agentic account. See
    [Going live](#going-live).
 
@@ -320,13 +321,13 @@ Before flipping `MODE=LIVE` in `.env`:
    were written from public documentation of the MCP without a live server available to confirm them
    against, and a mismatch there is a one-line fix once you know the real names.
 
-3. **Work through `DRY_RUN` → `OBSERVE` → `LIVE` in order**, not straight to `LIVE`:
+3. **Work through `DRY_RUN` → `PAPER_TRADING` → `LIVE` in order**, not straight to `LIVE`:
    - `MODE=DRY_RUN` first, to confirm the pipeline mechanics work (buckets, LLM calls, simulated
      fills/guardrails) without needing steps 1–2 above at all.
-   - `MODE=OBSERVE` next — real market data and real LLM decisions against the account you just
-     authorized, but it never places an order, not even a simulated one; BUY signals only get reported
-     (webhook + `/decisions` with `acted_on: false`). Run this for a real session or two and read what
-     it's actually reporting before trusting it with money.
+   - `MODE=PAPER_TRADING` next, run during real market hours — real market data and real LLM decisions,
+     the same simulated buy/sell/trailing-stop lifecycle as `DRY_RUN`, but with no real broker call
+     (still no MCP/OAuth setup needed). Run this for a real session or two and review the simulated
+     trades/PnL it actually produced before trusting it with money.
    - Only then `MODE=LIVE`.
 
 4. **Start small.** Lower `MAX_CAPITAL_PER_TRADE_USD` and `MAX_DAILY_DRAWDOWN_USD` in `.env` for your

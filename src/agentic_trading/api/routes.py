@@ -199,12 +199,10 @@ async def manual_order_entry(
     independently re-checked there regardless of what's passed here). Nothing here
     validates that buy_limit_price/target_sell_price make sense against the market
     -- that's the caller's job. Requires `?confirm=true` whenever MODE=LIVE, so a
-    routine or accidental call can't place real money by mistake; DRY_RUN/OBSERVE
-    need no confirmation since their broker is the in-memory simulator. Note this
-    deliberately bypasses OBSERVE mode's normal "zero order interaction" guarantee
-    (see scheduler._poll_ticker) -- that guarantee is about the automated poll
-    cycle, not this manual/operator-invoked debug endpoint. Refuses to run at all
-    while halted (see /kill-switch), same as /poll-cycle.
+    routine or accidental call can't place real money by mistake; DRY_RUN/
+    PAPER_TRADING need no confirmation since their broker is the in-memory
+    simulator. Refuses to run at all while halted (see /kill-switch), same as
+    /poll-cycle.
     """
     settings = get_settings()
     if request.app.state.halted:

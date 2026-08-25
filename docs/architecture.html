@@ -323,7 +323,7 @@ graph TB
     MAIN --> SCHED
     MAIN --> API
     MAIN -->|MODE=LIVE| MCP
-    MAIN -->|MODE=DRY_RUN/OBSERVE| OM
+    MAIN -->|MODE=DRY_RUN/PAPER_TRADING| OM
 
     SCHED --> RHC
     RHC --> BB
@@ -378,9 +378,8 @@ flowchart LR
     D["LLM decision<br/>TradeDecision: BUY / HOLD"]:::core
     E{"Confidence above<br/>threshold?"}:::gate
     F["Notify BUY signal"]:::store
-    G{"OBSERVE mode?"}:::gate
     H["Evaluate buy guardrails<br/>(position cap, daily trade cap,<br/>capital limit, circuit breaker,<br/>EOD cutoff)"]:::gate
-    I["Place paired buy→sell<br/>limit orders"]:::core
+    I["Place paired buy→sell<br/>limit orders<br/>(real MCP in LIVE, in-memory<br/>simulator in DRY_RUN/PAPER_TRADING)"]:::core
     J["Persist trade / order state"]:::store
     K["Order-management sweep<br/>(fills, timeouts)"]:::core
     L["EOD liquidation<br/>(same-session exit only)"]:::gate
@@ -388,9 +387,7 @@ flowchart LR
 
     A --> B --> C --> D --> E
     E -- no --> A
-    E -- yes --> F --> G
-    G -- yes, stop --> A
-    G -- no --> H
+    E -- yes --> F --> H
     H -- fails any check --> A
     H -- passes --> I --> J
     J --> K --> L --> M

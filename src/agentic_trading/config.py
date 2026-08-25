@@ -17,11 +17,15 @@ from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 class TradingMode(enum.StrEnum):
     DRY_RUN = "DRY_RUN"
-    # Phase 1: real market data + real LLM decisions, zero order interaction of any
-    # kind -- not even a simulated fill. BUY signals are alerted, not acted on.
-    # Needs no MCP/OAuth setup at all, since the broker's write path is never
-    # touched. Promote to LIVE (Phase 2) once you trust what it's been reporting.
-    OBSERVE = "OBSERVE"
+    # Real market data + real LLM decisions + the exact same simulated buy/sell/
+    # trailing-stop order lifecycle and DB tracking as DRY_RUN -- the only
+    # difference is intent and DB tagging (Order.mode/Trade rows are tagged
+    # PAPER_TRADING, not DRY_RUN). DRY_RUN is for local/dev testing at any time;
+    # PAPER_TRADING is meant to be run during real market hours as the final,
+    # capital-free rehearsal of what LIVE would actually do before promoting to
+    # it. Needs no MCP/OAuth setup, since the broker's write path is never touched
+    # -- it uses the same in-memory DryRunBrokerClient DRY_RUN does.
+    PAPER_TRADING = "PAPER_TRADING"
     LIVE = "LIVE"
 
 

@@ -427,9 +427,9 @@ async def _record_entry_decision(
         )
     else:
         # Covers HOLD, a BUY that didn't clear the confidence threshold, and a
-        # BUY that was blocked by a guardrail or reported-only in OBSERVE mode --
-        # none of these actually opened a position, so status stays HOLD, not
-        # IN_POSITION/BUY (see TickerStatus's docstring in state.ticker_state_store).
+        # BUY that was blocked by a guardrail -- none of these actually opened a
+        # position, so status stays HOLD, not IN_POSITION/BUY (see TickerStatus's
+        # docstring in state.ticker_state_store).
         updated_state = updated_state.model_copy(update={"status": "HOLD"})
     await ticker_state_store.save(updated_state)
 
@@ -598,12 +598,14 @@ async def _poll_ticker(
         if is_buy_signal:
             # Spec 5: alert on LLM confidence scores -- only for signals that clear
             # the threshold, since a 5-minute poll across a watchlist would otherwise
-            # spam a HOLD/low-confidence notification every cycle.
-            is_observe_only = settings.mode == TradingMode.OBSERVE
+            # spam a HOLD/low-confidence notification every cycle. `mode` is
+            # included so the same alert wording works across DRY_RUN/
+            # PAPER_TRADING/LIVE and the recipient can tell which produced it.
             await notifier.notify(
-                "Buying opportunity (observation only)" if is_observe_only else "BUY signal",
+                "BUY signal",
                 {
                     "ticker": ticker,
+                    "mode": settings.mode.value,
                     "confidence_score": decision.confidence_score,
                     "buy_limit_price": decision.buy_limit_price,
                     "target_sell_price": decision.target_sell_price,
@@ -611,37 +613,35 @@ async def _poll_ticker(
                 },
             )
 
-            if is_observe_only:
-                # Phase 1: report only -- no broker call of any kind, not even a
-                # simulated one. llm_decision.acted_on stays False (its default).
-                logger.info(
-                    "OBSERVE mode: BUY signal for %s reported, not acted on", ticker
-                )
-            else:
-                realized_pnl_all = await _realized_pnl_today_all_tickers(session, today)
-                outcome = await om.try_enter_position(
-                    session,
-                    broker,
-                    ticker=ticker,
-                    decision=decision,
-                    llm_decision_id=llm_decision.id,
-                    settings=settings,
-                    today=today,
-                    realized_pnl_today_all_tickers=realized_pnl_all,
-                    notifier=notifier,
-                )
-                llm_decision.acted_on = outcome.opened
-                if not outcome.opened:
-                    logger.info("BUY decision for %s not acted on: %s", ticker, outcome.reason)
-                # DryRunBrokerClient fills both legs instantly, so a BUY can open
-                # AND close again within this same call (paired sell fills right
-                # away) -- opened=True alone doesn't mean still holding by now.
-                # Re-check the actual DB state rather than trusting the outcome
-                # flag, so Redis doesn't end up claiming IN_POSITION for a trade
-                # that's already round-tripped closed.
-                opened = outcome.opened and (
-                    await repo.get_open_trade_for_ticker(session, ticker) is not None
-                )
+            # DRY_RUN, PAPER_TRADING, and LIVE all take the exact same path from
+            # here -- the only difference between them is which BrokerExecutionClient
+            # main.py wired up (real MCP vs. the in-memory DryRunBrokerClient) and
+            # what TradingModeEnum value gets stamped on the resulting Order/Trade
+            # rows. There is deliberately no mode branch here anymore.
+            realized_pnl_all = await _realized_pnl_today_all_tickers(session, today)
+            outcome = await om.try_enter_position(
+                session,
+                broker,
+                ticker=ticker,
+                decision=decision,
+                llm_decision_id=llm_decision.id,
+                settings=settings,
+                today=today,
+                realized_pnl_today_all_tickers=realized_pnl_all,
+                notifier=notifier,
+            )
+            llm_decision.acted_on = outcome.opened
+            if not outcome.opened:
+                logger.info("BUY decision for %s not acted on: %s", ticker, outcome.reason)
+            # DryRunBrokerClient fills both legs instantly, so a BUY can open
+            # AND close again within this same call (paired sell fills right
+            # away) -- opened=True alone doesn't mean still holding by now.
+            # Re-check the actual DB state rather than trusting the outcome
+            # flag, so Redis doesn't end up claiming IN_POSITION for a trade
+            # that's already round-tripped closed.
+            opened = outcome.opened and (
+                await repo.get_open_trade_for_ticker(session, ticker) is not None
+            )
 
         await _record_entry_decision(
             ticker_state_store,

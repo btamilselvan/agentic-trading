@@ -14,6 +14,7 @@ from agentic_trading.state import repository as repo
 from agentic_trading.state.db import session_scope
 from agentic_trading.state.models import (
     LlmDecision,
+    Order,
     OrderSide,
     OrderStatus,
     TradingModeEnum,
@@ -387,22 +388,6 @@ async def test_poll_cycle_opens_and_closes_trade_on_high_confidence_buy(db_sessi
         assert daily_state.open_positions_count == 0
 
 
-class FakeExplodingBroker:
-    """Any real call is a bug in OBSERVE mode -- it must never touch the broker."""
-
-    async def get_open_position_quantity(self, ticker: str) -> float:
-        raise AssertionError("OBSERVE mode must not query the broker")
-
-    async def review_order(self, **kwargs):
-        raise AssertionError("OBSERVE mode must not review an order")
-
-    async def place_order(self, **kwargs):
-        raise AssertionError("OBSERVE mode must not place an order")
-
-    async def cancel_order(self, broker_order_id: str) -> None:
-        raise AssertionError("OBSERVE mode must not cancel an order")
-
-
 class FakeNotifier:
     def __init__(self):
         self.calls: list[tuple[str, dict]] = []
@@ -411,7 +396,12 @@ class FakeNotifier:
         self.calls.append((title, fields))
 
 
-async def test_poll_cycle_reports_but_never_acts_in_observe_mode(db_session, monkeypatch):
+async def test_poll_cycle_paper_trades_exactly_like_dry_run(db_session, monkeypatch):
+    """PAPER_TRADING runs the identical simulated order lifecycle DRY_RUN does --
+    real data/LLM in, simulated buy+sell fill out, real DB updates -- the only
+    difference is Order.mode is tagged PAPER_TRADING, not DRY_RUN, so paper-
+    trading performance can be queried apart from ad hoc dev DRY_RUN runs.
+    """
     bar = HistoricalBar("AAPL", BUCKET_START, 100, 101, 99, 100.5, 1000)
     quote = Quote("AAPL", 100.4, 100.6, 500, 400, 100.5, None)
     _patch_market_data(monkeypatch, bar, quote)
@@ -427,11 +417,12 @@ async def test_poll_cycle_reports_but_never_acts_in_observe_mode(db_session, mon
     )
     llm = FakeLLMClient(decision)
     notifier = FakeNotifier()
+    broker = DryRunBrokerClient()
 
     await scheduler.run_poll_cycle(
-        broker=FakeExplodingBroker(),
+        broker=broker,
         llm_client=llm,
-        settings=_settings(mode=TradingMode.OBSERVE),
+        settings=_settings(mode=TradingMode.PAPER_TRADING),
         notifier=notifier,
         now=MID_WINDOW,
     )
@@ -440,16 +431,24 @@ async def test_poll_cycle_reports_but_never_acts_in_observe_mode(db_session, mon
         result = await session.execute(select(LlmDecision).where(LlmDecision.ticker == "AAPL"))
         saved = result.scalars().one()
         assert saved.decision.value == "BUY"
-        assert saved.acted_on is False  # reported, never acted on
+        assert saved.acted_on is True  # simulated, but genuinely acted on
 
         daily_state = await repo.get_or_create_daily_state(session, "AAPL", TODAY)
-        assert daily_state.completed_trades_count == 0
+        assert daily_state.completed_trades_count == 1
         assert daily_state.open_positions_count == 0
 
-    assert len(notifier.calls) == 1
-    title, fields = notifier.calls[0]
-    assert title == "Buying opportunity (observation only)"
-    assert fields["ticker"] == "AAPL"
+        orders = (
+            await session.execute(select(Order).where(Order.ticker == "AAPL"))
+        ).scalars().all()
+        assert len(orders) == 2  # buy + paired sell
+        assert all(o.mode == TradingModeEnum.PAPER_TRADING for o in orders)
+
+    titles = [title for title, _ in notifier.calls]
+    assert "BUY signal" in titles
+    assert "Order filled" in titles
+    assert "Trade closed" in titles
+    buy_signal_fields = next(fields for title, fields in notifier.calls if title == "BUY signal")
+    assert buy_signal_fields["mode"] == "PAPER_TRADING"
 
 
 async def test_poll_cycle_skips_llm_when_ticker_already_has_open_position(db_session, monkeypatch):

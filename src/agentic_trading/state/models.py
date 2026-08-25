@@ -40,6 +40,7 @@ class OrderStatus(enum.StrEnum):
 
 class TradingModeEnum(enum.StrEnum):
     DRY_RUN = "DRY_RUN"
+    PAPER_TRADING = "PAPER_TRADING"
     LIVE = "LIVE"
 
 

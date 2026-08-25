@@ -32,10 +32,10 @@ logger = logging.getLogger(__name__)
 
 def build_broker() -> BrokerExecutionClient:
     """MODE=LIVE talks to the real Robinhood Trading MCP (real money, in the
-    isolated Agentic account). DRY_RUN gets the in-memory simulator.
-    OBSERVE also gets the simulator, but never actually calls it -- scheduler.py
-    skips the order-entry path entirely in that mode (see _poll_ticker), so this
-    instance only exists to satisfy build_scheduler's signature.
+    isolated Agentic account). DRY_RUN and PAPER_TRADING both get the in-memory
+    DryRunBrokerClient -- scheduler.py runs the identical order-entry/management
+    path for both, so this simulator is genuinely exercised, not just wired to
+    satisfy build_scheduler's signature.
     """
     settings = get_settings()
     if settings.mode == TradingMode.LIVE:
