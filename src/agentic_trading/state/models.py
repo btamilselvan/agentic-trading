@@ -51,6 +51,9 @@ class TradeStatus(enum.StrEnum):
 class DecisionType(enum.StrEnum):
     BUY = "BUY"
     HOLD = "HOLD"
+    # Phase 3 (requirements.md section 8): early-exit signal for an IN_POSITION
+    # ticker -- see llm/schema.py's TradeDecision.decision.
+    SELL = "SELL"
 
 
 class Bucket(Base):
@@ -108,6 +111,12 @@ class LlmDecision(Base):
     confidence_score: Mapped[float] = mapped_column(Numeric(4, 3))
     buy_limit_price: Mapped[float | None] = mapped_column(Numeric(12, 4), nullable=True)
     target_sell_price: Mapped[float | None] = mapped_column(Numeric(12, 4), nullable=True)
+    # Phase 3 (requirements.md section 8) -- mirrors TradeDecision.stop_loss_price/
+    # thesis_continuity_flag (llm/schema.py) into the audit trail, same treatment
+    # as buy_limit_price/target_sell_price above. Nullable since decisions
+    # persisted before this column existed have neither.
+    stop_loss_price: Mapped[float | None] = mapped_column(Numeric(12, 4), nullable=True)
+    thesis_continuity_flag: Mapped[bool | None] = mapped_column(nullable=True)
     max_holding_time_minutes: Mapped[int | None] = mapped_column(nullable=True)
     pattern_reasoning: Mapped[str | None] = mapped_column(nullable=True)
 
@@ -158,12 +167,24 @@ class Trade(Base):
         ForeignKey("llm_decisions.id"), nullable=True
     )
     target_sell_price: Mapped[float | None] = mapped_column(Numeric(12, 4), nullable=True)
+    # Phase 3 (requirements.md section 8) -- the protective exit level, trailed
+    # upward only (see execution.invalidation.compute_trailing_stop); checked
+    # every poll cycle by execution.invalidation.evaluate_exit_guardrails while
+    # this trade is OPEN.
+    stop_loss_price: Mapped[float | None] = mapped_column(Numeric(12, 4), nullable=True)
     max_holding_time_minutes: Mapped[int | None] = mapped_column(nullable=True)
 
     entry_price: Mapped[float | None] = mapped_column(Numeric(12, 4), nullable=True)
     exit_price: Mapped[float | None] = mapped_column(Numeric(12, 4), nullable=True)
     quantity: Mapped[float | None] = mapped_column(Numeric(14, 6), nullable=True)
     pnl: Mapped[float | None] = mapped_column(Numeric(14, 4), nullable=True)
+    # Phase 3 -- why the trade closed: TARGET_HIT/STOP_LOSS/MOMENTUM_BREAK/
+    # CATALYST/TIMEOUT/EOD/LLM_THESIS_BREAK. Plain string (not a DB enum) since
+    # it's descriptive audit metadata, not something validated/branched on in
+    # Python -- see execution/order_manager.py's exit paths. Nullable: trades
+    # closed before this column existed, and the ordinary target-fill path,
+    # leave it unset.
+    exit_reason: Mapped[str | None] = mapped_column(nullable=True)
 
     opened_at: Mapped[datetime] = mapped_column(_TZDateTime, default=_utcnow)
     closed_at: Mapped[datetime | None] = mapped_column(_TZDateTime, nullable=True)

@@ -1,6 +1,7 @@
 from datetime import UTC, date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
+import pytest
 from sqlalchemy import select
 
 from agentic_trading import scheduler
@@ -14,8 +15,10 @@ from agentic_trading.state.db import session_scope
 from agentic_trading.state.models import (
     LlmDecision,
     OrderSide,
+    OrderStatus,
     TradingModeEnum,
 )
+from agentic_trading.state.ticker_state_store import InMemoryTickerStateStore
 
 TODAY = date(2026, 8, 17)
 BUCKET_START = datetime(2026, 8, 17, 9, 30, tzinfo=UTC)
@@ -24,6 +27,24 @@ BUCKET_START = datetime(2026, 8, 17, 9, 30, tzinfo=UTC)
 # tests need a "now" that actually falls inside it rather than relying on whatever
 # the real wall clock happens to be when the suite runs.
 MID_WINDOW = datetime(2026, 8, 17, 10, 0, tzinfo=ZoneInfo("America/New_York"))
+# Shared across the many tests below that don't care about the decision content
+# itself, just that a HOLD came back -- thesis_continuity_flag is required now
+# (requirements.md section 8) but irrelevant to what these tests assert.
+_HOLD_DECISION = TradeDecision(decision="HOLD", confidence_score=0.2, thesis_continuity_flag=True)
+
+
+@pytest.fixture(autouse=True)
+def _fake_ticker_state_store(monkeypatch):
+    """run_poll_cycle defaults its ticker_state_store via
+    scheduler.get_ticker_state_store() when the caller doesn't pass one -- every
+    test below relies on that default (none pass ticker_state_store explicitly),
+    so patch it to an isolated in-memory fake. Without this, these tests would
+    silently talk to (and leave test data in) whatever real Redis happens to be
+    reachable at REDIS_URL.
+    """
+    store = InMemoryTickerStateStore()
+    monkeypatch.setattr(scheduler, "get_ticker_state_store", lambda: store)
+    return store
 
 
 def _settings(**overrides) -> Settings:
@@ -132,7 +153,7 @@ async def test_run_poll_cycle_bypass_window_runs_outside_the_poll_window(db_sess
     bar = HistoricalBar("AAPL", BUCKET_START, 100, 101, 99, 100.5, 1000)
     _patch_market_data(monkeypatch, bar)
     outside_window = datetime(2026, 8, 17, 20, 0, tzinfo=ZoneInfo("America/New_York"))
-    llm = FakeLLMClient(TradeDecision(decision="HOLD", confidence_score=0.2))
+    llm = FakeLLMClient(_HOLD_DECISION)
 
     await scheduler.run_poll_cycle(
         broker=DryRunBrokerClient(),
@@ -150,7 +171,7 @@ async def test_poll_cycle_persists_bucket_and_skips_reprocessing_same_bucket(
 ):
     bar = HistoricalBar("AAPL", BUCKET_START, 100, 101, 99, 100.5, 1000)
     _patch_market_data(monkeypatch, bar)
-    llm = FakeLLMClient(TradeDecision(decision="HOLD", confidence_score=0.2))
+    llm = FakeLLMClient(_HOLD_DECISION)
     broker = DryRunBrokerClient()
     settings = _settings()
 
@@ -179,7 +200,7 @@ async def test_run_poll_cycle_fetches_market_context_once_and_threads_it_in(
     scheduler._rvol_lookback_cache.clear()
     _patch_catalyst_context(monkeypatch)
 
-    llm = CapturingLLMClient(TradeDecision(decision="HOLD", confidence_score=0.2))
+    llm = CapturingLLMClient(_HOLD_DECISION)
     settings = _settings(watchlist=["AAPL", "TSLA"], market_benchmark_ticker="SPY")
 
     await scheduler.run_poll_cycle(
@@ -211,7 +232,7 @@ async def test_market_context_fetch_failure_degrades_gracefully(db_session, monk
     scheduler._rvol_lookback_cache.clear()
     _patch_catalyst_context(monkeypatch)
 
-    llm = CapturingLLMClient(TradeDecision(decision="HOLD", confidence_score=0.2))
+    llm = CapturingLLMClient(_HOLD_DECISION)
     settings = _settings(watchlist=["AAPL"], market_benchmark_ticker="SPY")
 
     await scheduler.run_poll_cycle(
@@ -235,7 +256,7 @@ async def test_market_benchmark_ticker_empty_disables_market_context(db_session,
     scheduler._rvol_lookback_cache.clear()
     _patch_catalyst_context(monkeypatch)
 
-    llm = CapturingLLMClient(TradeDecision(decision="HOLD", confidence_score=0.2))
+    llm = CapturingLLMClient(_HOLD_DECISION)
     settings = _settings(watchlist=["AAPL"], market_benchmark_ticker="")
 
     await scheduler.run_poll_cycle(
@@ -260,7 +281,7 @@ async def test_poll_cycle_threads_catalyst_context_into_ticker_state(db_session,
     monkeypatch.setattr(scheduler.rh, "get_latest_news", lambda ticker: news)
     monkeypatch.setattr(scheduler.rh, "get_float_shares", lambda ticker: 15_000_000)
 
-    llm = CapturingLLMClient(TradeDecision(decision="HOLD", confidence_score=0.2))
+    llm = CapturingLLMClient(_HOLD_DECISION)
 
     await scheduler.run_poll_cycle(
         broker=DryRunBrokerClient(), llm_client=llm, settings=_settings(), now=MID_WINDOW
@@ -283,7 +304,7 @@ async def test_catalyst_context_fetch_failure_degrades_gracefully(db_session, mo
     monkeypatch.setattr(scheduler.rh, "get_latest_news", raise_error)
     monkeypatch.setattr(scheduler.rh, "get_float_shares", raise_error)
 
-    llm = CapturingLLMClient(TradeDecision(decision="HOLD", confidence_score=0.2))
+    llm = CapturingLLMClient(_HOLD_DECISION)
 
     await scheduler.run_poll_cycle(
         broker=DryRunBrokerClient(), llm_client=llm, settings=_settings(), now=MID_WINDOW
@@ -321,7 +342,7 @@ async def test_float_shares_is_fetched_once_per_ticker_across_poll_cycles(db_ses
     scheduler._rvol_lookback_cache.clear()
     scheduler._float_shares_cache.clear()
 
-    llm = CapturingLLMClient(TradeDecision(decision="HOLD", confidence_score=0.2))
+    llm = CapturingLLMClient(_HOLD_DECISION)
     settings = _settings(market_benchmark_ticker="")  # no SPY fetch to account for
 
     await scheduler.run_poll_cycle(
@@ -344,8 +365,10 @@ async def test_poll_cycle_opens_and_closes_trade_on_high_confidence_buy(db_sessi
         confidence_score=0.9,
         buy_limit_price=100.5,
         target_sell_price=102.0,
+        stop_loss_price=99.0,
         max_holding_time_minutes=30,
         pattern_reasoning="breakout",
+        thesis_continuity_flag=True,
     )
     llm = FakeLLMClient(decision)
     broker = DryRunBrokerClient()
@@ -397,8 +420,10 @@ async def test_poll_cycle_reports_but_never_acts_in_observe_mode(db_session, mon
         confidence_score=0.9,
         buy_limit_price=100.5,
         target_sell_price=102.0,
+        stop_loss_price=99.0,
         max_holding_time_minutes=30,
         pattern_reasoning="breakout",
+        thesis_continuity_flag=True,
     )
     llm = FakeLLMClient(decision)
     notifier = FakeNotifier()
@@ -521,3 +546,294 @@ async def test_eod_liquidation_closes_open_trade_at_quoted_bid(db_session, monke
     async with session_scope() as session:
         trades = await repo.get_open_trades(session, ticker="AAPL")
         assert trades == []  # trade was closed by the liquidation sweep
+
+
+# --- Phase 3: IN_POSITION re-evaluation branch (requirements.md section 8) -----
+
+
+class PendingFillBroker:
+    """Like DryRunBrokerClient but every order stays PENDING rather than filling
+    instantly -- used where a test needs to observe an OPEN trade's updated
+    resting-order state without an instant fill immediately closing it out.
+    """
+
+    def __init__(self, position_qty: float = 0.0):
+        self._position_qty = position_qty
+        self.cancelled: list[str] = []
+        self._next_id = 1
+
+    async def get_open_position_quantity(self, ticker: str) -> float:
+        return self._position_qty
+
+    async def review_order(self, **kwargs) -> OrderReview:
+        return OrderReview(warnings=[], estimated_price=kwargs.get("limit_price"))
+
+    async def place_order(self, **kwargs) -> PlacedOrder:
+        order_id = f"PENDING-{self._next_id}"
+        self._next_id += 1
+        return PlacedOrder(broker_order_id=order_id, status="pending", fill_price=None)
+
+    async def cancel_order(self, broker_order_id: str) -> None:
+        self.cancelled.append(broker_order_id)
+
+
+async def _seed_open_trade(
+    session,
+    *,
+    ticker="AAPL",
+    entry_price=100.0,
+    target_sell_price=105.0,
+    stop_loss_price=97.0,
+    quantity=5,
+) -> None:
+    """An OPEN trade with a FILLED buy leg and a resting PENDING sell -- the
+    state _manage_open_position (via repo.get_open_trade_for_ticker) expects to
+    find for a ticker already IN_POSITION.
+    """
+    decision = await repo.save_llm_decision(
+        session,
+        ticker=ticker,
+        bucket_id=None,
+        prompt="p",
+        raw_response="{}",
+        decision="BUY",
+        confidence_score=0.9,
+        buy_limit_price=entry_price,
+        target_sell_price=target_sell_price,
+        stop_loss_price=stop_loss_price,
+        max_holding_time_minutes=30,
+        pattern_reasoning="breakout",
+        thesis_continuity_flag=True,
+    )
+    trade = await repo.open_trade(
+        session,
+        ticker=ticker,
+        trade_date=TODAY,
+        entry_price=entry_price,
+        quantity=quantity,
+        llm_decision_id=decision.id,
+        target_sell_price=target_sell_price,
+        stop_loss_price=stop_loss_price,
+        max_holding_time_minutes=30,
+    )
+    buy_order = await repo.create_order(
+        session,
+        ticker=ticker,
+        side=OrderSide.BUY,
+        limit_price=entry_price,
+        quantity=quantity,
+        mode=TradingModeEnum.DRY_RUN,
+        broker_order_id="BUY-1",
+        trade_id=trade.id,
+    )
+    await repo.update_order_status(session, buy_order.id, OrderStatus.FILLED)
+    await repo.create_order(
+        session,
+        ticker=ticker,
+        side=OrderSide.SELL,
+        limit_price=target_sell_price,
+        quantity=quantity,
+        mode=TradingModeEnum.DRY_RUN,
+        broker_order_id="SELL-1",
+        trade_id=trade.id,
+    )
+    await repo.record_trade_opened(session, ticker, TODAY)
+
+
+def _notified(notifier: FakeNotifier, title: str) -> dict:
+    return next(fields for t, fields in notifier.calls if t == title)
+
+
+async def test_poll_ticker_forces_stop_loss_exit_without_an_llm_call(
+    db_session, monkeypatch, _fake_ticker_state_store
+):
+    bar = HistoricalBar("AAPL", BUCKET_START, 96, 96.5, 94, 95.0, 1000)  # closes at 95
+    quote = Quote("AAPL", 94.9, 95.1, 500, 500, 95.0, None)
+    _patch_market_data(monkeypatch, bar, quote)
+    async with session_scope() as session:
+        await _seed_open_trade(session, stop_loss_price=97.0)  # 95 <= 97 -> breached
+
+    broker = DryRunBrokerClient()
+    broker._positions["AAPL"] = 5  # noqa: SLF001 -- seeding an open position for the test
+    llm = FakeLLMClient(_HOLD_DECISION)  # must not be called at all
+    notifier = FakeNotifier()
+
+    await scheduler.run_poll_cycle(
+        broker=broker, llm_client=llm, settings=_settings(), notifier=notifier, now=MID_WINDOW
+    )
+
+    assert llm.calls == 0  # deterministic exit -- no LLM round-trip needed
+    async with session_scope() as session:
+        assert await repo.get_open_trades(session, ticker="AAPL") == []
+    assert _notified(notifier, "Trade closed")["exit_reason"] == "STOP_LOSS"
+    assert await _fake_ticker_state_store.get("AAPL", TODAY) is None  # cleared on close
+
+
+async def test_poll_ticker_exits_on_llm_sell_decision(
+    db_session, monkeypatch, _fake_ticker_state_store
+):
+    bar = HistoricalBar("AAPL", BUCKET_START, 100, 101, 99, 100.5, 1000)
+    quote = Quote("AAPL", 100.4, 100.6, 500, 500, 100.5, None)
+    _patch_market_data(monkeypatch, bar, quote)
+    async with session_scope() as session:
+        await _seed_open_trade(session, stop_loss_price=90.0)  # nowhere near breached
+
+    broker = DryRunBrokerClient()
+    broker._positions["AAPL"] = 5  # noqa: SLF001 -- seeding an open position for the test
+    sell_decision = TradeDecision(
+        decision="SELL",
+        confidence_score=0.8,
+        thesis_continuity_flag=False,
+        pattern_reasoning="momentum stalled, exiting early",
+    )
+    llm = FakeLLMClient(sell_decision)
+    notifier = FakeNotifier()
+
+    await scheduler.run_poll_cycle(
+        broker=broker, llm_client=llm, settings=_settings(), notifier=notifier, now=MID_WINDOW
+    )
+
+    assert llm.calls == 1
+    async with session_scope() as session:
+        assert await repo.get_open_trades(session, ticker="AAPL") == []
+    assert _notified(notifier, "Trade closed")["exit_reason"] == "LLM_THESIS_BREAK"
+    assert await _fake_ticker_state_store.get("AAPL", TODAY) is None
+
+
+async def test_poll_ticker_holds_and_records_continuity_when_no_invalidation(
+    db_session, monkeypatch, _fake_ticker_state_store
+):
+    bar = HistoricalBar("AAPL", BUCKET_START, 100, 101, 99, 100.5, 1000)
+    quote = Quote("AAPL", 100.4, 100.6, 500, 500, 100.5, None)
+    _patch_market_data(monkeypatch, bar, quote)
+    async with session_scope() as session:
+        await _seed_open_trade(session, stop_loss_price=90.0)
+
+    broker = PendingFillBroker(position_qty=5)
+    hold_decision = TradeDecision(
+        decision="HOLD",
+        confidence_score=0.7,
+        thesis_continuity_flag=True,
+        pattern_reasoning="still intact",
+    )
+    llm = FakeLLMClient(hold_decision)
+
+    await scheduler.run_poll_cycle(
+        broker=broker, llm_client=llm, settings=_settings(), now=MID_WINDOW
+    )
+
+    assert llm.calls == 1
+    async with session_scope() as session:
+        trades = await repo.get_open_trades(session, ticker="AAPL")
+        assert len(trades) == 1  # still open -- nothing invalidated
+    state = await _fake_ticker_state_store.get("AAPL", TODAY)
+    assert state.status == "IN_POSITION"
+    assert len(state.decision_history) == 1
+    assert state.decision_history[0].decision == "HOLD"
+
+
+async def test_poll_ticker_trails_target_and_stop_upward_when_enabled(
+    db_session, monkeypatch, _fake_ticker_state_store
+):
+    bar = HistoricalBar("AAPL", BUCKET_START, 100, 105, 99, 104.0, 1000)
+    quote = Quote("AAPL", 103.9, 104.1, 500, 500, 104.0, None)
+    _patch_market_data(monkeypatch, bar, quote)
+    async with session_scope() as session:
+        await _seed_open_trade(session, target_sell_price=102.0, stop_loss_price=98.0)
+
+    broker = PendingFillBroker(position_qty=5)
+    hold_decision = TradeDecision(
+        decision="HOLD",
+        confidence_score=0.75,
+        thesis_continuity_flag=True,
+        target_sell_price=106.0,  # better than current 102.0
+        stop_loss_price=99.0,  # better than current 98.0
+        pattern_reasoning="still trending, ratchet up",
+    )
+    llm = FakeLLMClient(hold_decision)
+
+    await scheduler.run_poll_cycle(
+        broker=broker,
+        llm_client=llm,
+        settings=_settings(trailing_stop_enabled=True),
+        now=MID_WINDOW,
+    )
+
+    async with session_scope() as session:
+        trades = await repo.get_open_trades(session, ticker="AAPL")
+        assert len(trades) == 1
+        trade = trades[0]
+        assert float(trade.target_sell_price) == 106.0
+        assert float(trade.stop_loss_price) == 99.0
+    # The old resting sell (target 102.0) was cancelled and replaced.
+    assert "SELL-1" in broker.cancelled
+
+
+async def test_poll_ticker_does_not_trail_when_disabled(
+    db_session, monkeypatch, _fake_ticker_state_store
+):
+    bar = HistoricalBar("AAPL", BUCKET_START, 100, 105, 99, 104.0, 1000)
+    quote = Quote("AAPL", 103.9, 104.1, 500, 500, 104.0, None)
+    _patch_market_data(monkeypatch, bar, quote)
+    async with session_scope() as session:
+        await _seed_open_trade(session, target_sell_price=102.0, stop_loss_price=98.0)
+
+    broker = PendingFillBroker(position_qty=5)
+    hold_decision = TradeDecision(
+        decision="HOLD",
+        confidence_score=0.75,
+        thesis_continuity_flag=True,
+        target_sell_price=106.0,
+        stop_loss_price=99.0,
+        pattern_reasoning="still trending",
+    )
+    llm = FakeLLMClient(hold_decision)
+
+    await scheduler.run_poll_cycle(
+        broker=broker,
+        llm_client=llm,
+        settings=_settings(trailing_stop_enabled=False),
+        now=MID_WINDOW,
+    )
+
+    assert broker.cancelled == []  # no order replacement attempted
+    async with session_scope() as session:
+        trades = await repo.get_open_trades(session, ticker="AAPL")
+        assert float(trades[0].target_sell_price) == 102.0  # unchanged
+        assert float(trades[0].stop_loss_price) == 98.0  # unchanged
+
+
+async def test_poll_ticker_initializes_redis_in_position_state_on_buy_entry(
+    db_session, monkeypatch, _fake_ticker_state_store
+):
+    bar = HistoricalBar("AAPL", BUCKET_START, 100, 101, 99, 100.5, 1000)
+    quote = Quote("AAPL", 100.4, 100.6, 500, 400, 100.5, None)
+    _patch_market_data(monkeypatch, bar, quote)
+    decision = TradeDecision(
+        decision="BUY",
+        confidence_score=0.9,
+        buy_limit_price=100.5,
+        target_sell_price=102.0,
+        stop_loss_price=99.0,
+        max_holding_time_minutes=30,
+        pattern_reasoning="breakout",
+        thesis_continuity_flag=True,
+    )
+    llm = FakeLLMClient(decision)
+    # A pending-fill broker so the trade opens but doesn't instantly round-trip
+    # closed again within this same cycle (DryRunBrokerClient would fill both
+    # legs instantly, making status IN_POSITION observably wrong by the time this
+    # test checks it).
+    broker = PendingFillBroker()
+
+    await scheduler.run_poll_cycle(
+        broker=broker, llm_client=llm, settings=_settings(), now=MID_WINDOW
+    )
+
+    state = await _fake_ticker_state_store.get("AAPL", TODAY)
+    assert state is not None
+    assert state.status == "IN_POSITION"
+    assert state.active_thesis == "breakout"
+    assert state.initial_entry_price == 100.5
+    assert state.target_price == 102.0
+    assert state.stop_loss == 99.0

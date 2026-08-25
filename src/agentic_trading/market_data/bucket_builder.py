@@ -49,6 +49,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from decimal import Decimal
 from typing import Protocol, runtime_checkable
 
 from agentic_trading.market_data.robinhood_client import HistoricalBar, Quote
@@ -108,6 +109,18 @@ class MetricBucket:
     rvol: float | None
     vwap: float | None
     rsi: float | None
+
+
+def to_float(value: float | Decimal | None) -> float | None:
+    """Normalize a numeric bucket field to plain float. Bucket rows read back from
+    the DB come back as Decimal (Bucket's columns are SQLAlchemy Numeric, despite
+    the `Mapped[float]` type hint on BucketLike-conforming rows), while a
+    freshly-built MetricBucket for the current bucket holds plain floats. Mixing
+    the two breaks both JSON serialization (llm/prompt.py) and Decimal/float
+    arithmetic (scheduler.py's exit-guardrail checks) -- normalize once, here,
+    rather than duplicating this per call site.
+    """
+    return None if value is None else float(value)
 
 
 def pct_change(value: float | None, reference: float | None) -> float | None:

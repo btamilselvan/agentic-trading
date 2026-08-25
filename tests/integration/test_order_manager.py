@@ -1,6 +1,7 @@
 from datetime import UTC, date, datetime
 
 import pytest
+from sqlalchemy import select
 
 from agentic_trading.config import Settings, TradingMode
 from agentic_trading.execution import order_manager as om
@@ -40,8 +41,10 @@ def _buy_decision(**overrides) -> TradeDecision:
         confidence_score=0.9,
         buy_limit_price=100.0,
         target_sell_price=102.0,
+        stop_loss_price=98.0,
         max_holding_time_minutes=30,
         pattern_reasoning="breakout",
+        thesis_continuity_flag=True,
     )
     kwargs.update(overrides)
     return TradeDecision(**kwargs)
@@ -560,3 +563,163 @@ async def test_liquidate_all_open_positions_isolates_one_tickers_failure_from_th
     refreshed_msft = await db_session.get(Trade, msft_trade.id)
     assert refreshed_msft.status == TradeStatus.CLOSED
     assert float(refreshed_msft.exit_price) == 50.5
+
+
+async def _open_position_with_pending_sell(
+    db_session, *, entry_price=100.0, target_sell_price=102.0, stop_loss_price=98.0, quantity=5
+):
+    """Phase 3 test fixture: an OPEN trade with a FILLED buy leg and a resting
+    PENDING sell at target_sell_price -- the state try_exit_position_early/
+    apply_trailing_stop expect to find via repo.get_open_trade_for_ticker.
+    """
+    decision_id = await _seed_decision(db_session)
+    trade = await repo.open_trade(
+        db_session,
+        ticker="AAPL",
+        trade_date=TODAY,
+        entry_price=entry_price,
+        quantity=quantity,
+        llm_decision_id=decision_id,
+        target_sell_price=target_sell_price,
+        stop_loss_price=stop_loss_price,
+        max_holding_time_minutes=30,
+    )
+    buy_order = await repo.create_order(
+        db_session,
+        ticker="AAPL",
+        side=OrderSide.BUY,
+        limit_price=entry_price,
+        quantity=quantity,
+        mode=TradingModeEnum.DRY_RUN,
+        broker_order_id="BUY-1",
+        trade_id=trade.id,
+    )
+    await repo.update_order_status(db_session, buy_order.id, OrderStatus.FILLED)
+    await repo.create_order(
+        db_session,
+        ticker="AAPL",
+        side=OrderSide.SELL,
+        limit_price=target_sell_price,
+        quantity=quantity,
+        mode=TradingModeEnum.DRY_RUN,
+        broker_order_id="SELL-1",
+        trade_id=trade.id,
+    )
+    await db_session.flush()
+    return await repo.get_open_trade_for_ticker(db_session, "AAPL")
+
+
+async def test_try_exit_position_early_cancels_resting_sell_and_closes_at_exit_price(db_session):
+    broker = om.DryRunBrokerClient()
+    broker._positions["AAPL"] = 5  # noqa: SLF001 -- test seeding an open position directly
+    trade = await _open_position_with_pending_sell(db_session)
+
+    exited = await om.try_exit_position_early(
+        db_session, broker, trade=trade, exit_price=97.0, exit_reason="STOP_LOSS"
+    )
+
+    assert exited is True
+    assert trade.status == TradeStatus.CLOSED
+    assert float(trade.exit_price) == 97.0
+    assert trade.exit_reason == "STOP_LOSS"
+    assert float(trade.pnl) == pytest.approx((97.0 - 100.0) * 5)
+
+    orders = await repo.get_open_orders(db_session, ticker="AAPL")
+    assert orders == []  # the old resting sell was cancelled, the new one filled
+    # trade.orders was eager-loaded before the new exit order was created in this
+    # same session, so it won't reflect it -- query fresh instead.
+    all_sell_orders = (
+        await db_session.scalars(
+            select(Order).where(Order.ticker == "AAPL", Order.side == OrderSide.SELL)
+        )
+    ).all()
+    assert len(all_sell_orders) == 2
+    cancelled = next(o for o in all_sell_orders if o.broker_order_id == "SELL-1")
+    assert cancelled.status == OrderStatus.CANCELLED
+
+
+async def test_try_exit_position_early_does_nothing_when_trade_already_closed(db_session):
+    broker = om.DryRunBrokerClient()
+    trade = await _open_position_with_pending_sell(db_session)
+    # Same session -> repo.close_trade's session.get(Trade, ...) returns this exact
+    # object (identity map), so `trade.status` is already CLOSED after this call.
+    await repo.close_trade(
+        db_session, trade.id, exit_price=102.0, closed_at=datetime.now(UTC), pnl=10.0
+    )
+    assert trade.status == TradeStatus.CLOSED
+
+    exited = await om.try_exit_position_early(
+        db_session, broker, trade=trade, exit_price=97.0, exit_reason="STOP_LOSS"
+    )
+
+    assert exited is False
+
+
+async def test_try_exit_position_early_does_nothing_when_broker_has_no_position(db_session):
+    broker = om.DryRunBrokerClient()  # no position seeded -- get_open_position_quantity == 0
+    trade = await _open_position_with_pending_sell(db_session)
+
+    exited = await om.try_exit_position_early(
+        db_session, broker, trade=trade, exit_price=97.0, exit_reason="STOP_LOSS"
+    )
+
+    assert exited is False
+    assert trade.status == TradeStatus.OPEN  # untouched
+
+
+async def test_apply_trailing_stop_replaces_resting_sell_when_target_raised(db_session):
+    broker = om.DryRunBrokerClient()
+    broker._positions["AAPL"] = 5  # noqa: SLF001 -- test seeding an open position directly
+    trade = await _open_position_with_pending_sell(db_session)
+
+    await om.apply_trailing_stop(db_session, broker, trade=trade, new_target=105.0, new_stop=99.0)
+
+    orders = await repo.get_open_orders(db_session, ticker="AAPL")
+    assert orders == []  # DryRunBrokerClient fills the replacement instantly
+    assert trade.status == TradeStatus.CLOSED  # filled at the new, higher target
+    assert float(trade.exit_price) == 105.0
+    assert trade.exit_reason == "TARGET_HIT"
+
+
+async def test_apply_trailing_stop_leaves_resting_order_untouched_when_target_not_raised(
+    db_session,
+):
+    broker = FakeLaggyBroker()  # orders stay PENDING -- proves no replacement was attempted
+    trade = await _open_position_with_pending_sell(db_session)
+
+    # Only the stop is trailed up this cycle; the target proposal equals the
+    # current target, so nothing about the resting sell order should change.
+    await om.apply_trailing_stop(db_session, broker, trade=trade, new_target=102.0, new_stop=99.0)
+
+    assert broker.cancelled == []
+    refreshed_trade = await db_session.get(Trade, trade.id)
+    assert float(refreshed_trade.stop_loss_price) == 99.0
+    assert float(refreshed_trade.target_sell_price) == 102.0
+
+
+async def test_apply_trailing_stop_updates_levels_even_without_a_pending_sell(db_session):
+    # No resting sell order exists yet (e.g. still mid-retry via
+    # retry_missing_paired_sells) -- must not crash, and still records the
+    # trailed values so the eventual paired sell uses them.
+    broker = om.DryRunBrokerClient()
+    decision_id = await _seed_decision(db_session)
+    trade_row = await repo.open_trade(
+        db_session,
+        ticker="AAPL",
+        trade_date=TODAY,
+        entry_price=100.0,
+        quantity=5,
+        llm_decision_id=decision_id,
+        target_sell_price=102.0,
+        stop_loss_price=98.0,
+        max_holding_time_minutes=30,
+    )
+    await db_session.flush()
+    trade = await repo.get_open_trade_for_ticker(db_session, "AAPL")
+    assert trade.id == trade_row.id
+
+    await om.apply_trailing_stop(db_session, broker, trade=trade, new_target=105.0, new_stop=99.0)
+
+    refreshed_trade = await db_session.get(Trade, trade.id)
+    assert float(refreshed_trade.target_sell_price) == 105.0
+    assert float(refreshed_trade.stop_loss_price) == 99.0

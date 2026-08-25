@@ -7,6 +7,7 @@ from agentic_trading.llm.prompt import build_prompt
 from agentic_trading.llm.schema import TickerState
 from agentic_trading.market_data.bucket_builder import build_bucket
 from agentic_trading.market_data.robinhood_client import HistoricalBar, Quote
+from agentic_trading.state.ticker_state_store import DecisionLogEntry
 
 
 def test_prompt_contains_full_bucket_history_and_ticker_state():
@@ -358,7 +359,70 @@ def test_prompt_includes_decision_contract_fields():
         "confidence_score",
         "buy_limit_price",
         "target_sell_price",
+        "stop_loss_price",
         "max_holding_time_minutes",
         "pattern_reasoning",
+        "thesis_continuity_flag",
     ):
         assert field in prompt
+
+
+def test_prompt_includes_position_context_defaults_when_flat():
+    state = TickerState(completed_trades_today=0, open_positions=0, realized_pnl_today=0.0)
+
+    prompt = build_prompt("AAPL", [], state)
+
+    payload = json.loads(prompt.split("Input:\n", 1)[1])
+    assert payload["position_context"] == {
+        "status": "FLAT",
+        "active_thesis": None,
+        "initial_entry_price": None,
+        "current_target_price": None,
+        "current_stop_loss": None,
+        "recent_decisions": [],
+    }
+    assert "position_context" in prompt.split("Input:\n", 1)[0]  # mentioned in instructions
+    assert "hysteresis" in prompt.split("Input:\n", 1)[0].lower()
+
+
+def test_prompt_includes_position_context_with_active_thesis_and_history():
+    state = TickerState(
+        completed_trades_today=0,
+        open_positions=1,
+        realized_pnl_today=0.0,
+        status="IN_POSITION",
+        active_thesis="morning breakout continuation",
+        initial_entry_price=100.0,
+        current_target_price=103.0,
+        current_stop_loss=98.5,
+        decision_history=[
+            DecisionLogEntry(
+                bucket_start=datetime(2026, 8, 24, 9, 30, tzinfo=UTC),
+                decision="BUY",
+                confidence_score=0.85,
+                thesis_continuity_flag=True,
+                pattern_reasoning="breakout",
+            ),
+            DecisionLogEntry(
+                bucket_start=datetime(2026, 8, 24, 9, 35, tzinfo=UTC),
+                decision="HOLD",
+                confidence_score=0.8,
+                thesis_continuity_flag=True,
+                pattern_reasoning="still holding above VWAP",
+            ),
+        ],
+    )
+
+    prompt = build_prompt("AAPL", [], state)
+
+    payload = json.loads(prompt.split("Input:\n", 1)[1])
+    position_context = payload["position_context"]
+    assert position_context["status"] == "IN_POSITION"
+    assert position_context["active_thesis"] == "morning breakout continuation"
+    assert position_context["current_target_price"] == 103.0
+    assert position_context["current_stop_loss"] == 98.5
+    assert len(position_context["recent_decisions"]) == 2
+    assert position_context["recent_decisions"][0]["decision"] == "BUY"
+    assert position_context["recent_decisions"][1]["pattern_reasoning"] == (
+        "still holding above VWAP"
+    )

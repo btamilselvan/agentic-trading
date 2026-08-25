@@ -120,6 +120,7 @@ async def open_trade(
     quantity: float,
     llm_decision_id: int | None = None,
     target_sell_price: float | None = None,
+    stop_loss_price: float | None = None,
     max_holding_time_minutes: int | None = None,
 ) -> Trade:
     trade = Trade(
@@ -130,6 +131,7 @@ async def open_trade(
         quantity=quantity,
         llm_decision_id=llm_decision_id,
         target_sell_price=target_sell_price,
+        stop_loss_price=stop_loss_price,
         max_holding_time_minutes=max_holding_time_minutes,
     )
     session.add(trade)
@@ -137,8 +139,31 @@ async def open_trade(
     return trade
 
 
+async def update_trade_trailing_levels(
+    session: AsyncSession, trade_id: int, *, target_sell_price: float, stop_loss_price: float
+) -> Trade:
+    """Phase 3: applies a one-way trailing-stop ratchet (see
+    execution.invalidation.compute_trailing_stop) to an OPEN trade's resting
+    levels. Callers are responsible for ensuring the new values are never less
+    favorable than the current ones -- this just persists whatever it's given.
+    """
+    trade = await session.get(Trade, trade_id)
+    if trade is None:
+        raise ValueError(f"Trade {trade_id} not found")
+    trade.target_sell_price = target_sell_price
+    trade.stop_loss_price = stop_loss_price
+    await session.flush()
+    return trade
+
+
 async def close_trade(
-    session: AsyncSession, trade_id: int, *, exit_price: float, closed_at: datetime, pnl: float
+    session: AsyncSession,
+    trade_id: int,
+    *,
+    exit_price: float,
+    closed_at: datetime,
+    pnl: float,
+    exit_reason: str | None = None,
 ) -> Trade:
     trade = await session.get(Trade, trade_id)
     if trade is None:
@@ -147,6 +172,8 @@ async def close_trade(
     trade.exit_price = exit_price
     trade.closed_at = closed_at
     trade.pnl = pnl
+    if exit_reason is not None:
+        trade.exit_reason = exit_reason
     await session.flush()
     return trade
 
@@ -156,6 +183,24 @@ async def get_open_trades(session: AsyncSession, *, ticker: str | None = None) -
     if ticker is not None:
         stmt = stmt.where(Trade.ticker == ticker)
     return list((await session.scalars(stmt)).all())
+
+
+async def get_open_trade_for_ticker(session: AsyncSession, ticker: str) -> Trade | None:
+    """The single OPEN trade for `ticker`, if any, with its orders eager-loaded
+    (selectinload -- see get_open_trades_missing_sell_order's docstring for why
+    that's necessary with the async ORM) so callers (execution.order_manager.
+    try_exit_position_early/apply_trailing_stop, scheduler._poll_ticker's
+    IN_POSITION branch) can inspect trade.orders without a separate lazy-load.
+    Assumes at most one OPEN trade per ticker (the default
+    max_open_positions_per_ticker guardrail is 1) -- returns the first if that's
+    ever violated by a looser guardrail config.
+    """
+    stmt = (
+        select(Trade)
+        .options(selectinload(Trade.orders))
+        .where(Trade.ticker == ticker, Trade.status == TradeStatus.OPEN)
+    )
+    return (await session.scalars(stmt)).first()
 
 
 async def get_open_trades_missing_sell_order(session: AsyncSession) -> list[Trade]:

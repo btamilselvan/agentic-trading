@@ -173,6 +173,9 @@ class ManualEntryRequest(BaseModel):
     ticker: str
     buy_limit_price: float = Field(gt=0)
     target_sell_price: float = Field(gt=0)
+    # Required now that TradeDecision validates BUY decisions carry a protective
+    # stop level (requirements.md section 8) -- see llm/schema.py.
+    stop_loss_price: float = Field(gt=0)
     max_holding_time_minutes: int = Field(gt=0, default=15)
     confidence_score: float = Field(default=1.0, ge=0.0, le=1.0)
     pattern_reasoning: str = "Manual test entry via POST /orders/manual-entry"
@@ -218,8 +221,11 @@ async def manual_order_entry(
         confidence_score=body.confidence_score,
         buy_limit_price=body.buy_limit_price,
         target_sell_price=body.target_sell_price,
+        stop_loss_price=body.stop_loss_price,
         max_holding_time_minutes=body.max_holding_time_minutes,
         pattern_reasoning=body.pattern_reasoning,
+        # No active thesis to break for a manual/operator-invoked test entry.
+        thesis_continuity_flag=True,
     )
     today = datetime.now(UTC).date()
 
@@ -234,8 +240,10 @@ async def manual_order_entry(
             confidence_score=decision.confidence_score,
             buy_limit_price=decision.buy_limit_price,
             target_sell_price=decision.target_sell_price,
+            stop_loss_price=decision.stop_loss_price,
             max_holding_time_minutes=decision.max_holding_time_minutes,
             pattern_reasoning=decision.pattern_reasoning,
+            thesis_continuity_flag=decision.thesis_continuity_flag,
         )
         realized_pnl_all = await repo.realized_pnl_today_all_tickers(
             session, settings.watchlist, today

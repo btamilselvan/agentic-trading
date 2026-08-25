@@ -3,6 +3,11 @@
 Per spec section 3.2, the LLM sees the COMPLETE array of the day's 5-minute buckets
 for the ticker (not just the latest one) so it can evaluate for same-day intraday
 setups (breakout, volume absorption, mean reversion, momentum continuation).
+
+Per spec section 8, it also sees position_context -- the continuity state
+(status/active_thesis/stop/target/recent decisions) scheduler.py loaded from Redis
+(state.ticker_state_store) before this cycle -- so an active BUY/IN_POSITION/HOLD
+call isn't re-derived from scratch (and flip-flopped on noise) every 5 minutes.
 """
 
 from __future__ import annotations
@@ -11,7 +16,6 @@ import json
 import logging
 from collections.abc import Sequence
 from datetime import datetime
-from decimal import Decimal
 
 from agentic_trading.llm.schema import TickerState
 from agentic_trading.market_data.bucket_builder import (
@@ -22,6 +26,7 @@ from agentic_trading.market_data.bucket_builder import (
     rsi_centerline_cross,
     session_phase,
 )
+from agentic_trading.market_data.bucket_builder import to_float as _num
 
 logger = logging.getLogger(__name__)
 
@@ -79,32 +84,67 @@ rather than higher confidence on its own). Short interest is not available from 
 the current data sources and is never included -- do not assume its absence means \
 low short interest.
 
+position_context carries this ticker's continuity state from prior cycles today -- \
+status is one of FLAT (no thesis, never entered), HOLD (a thesis is being tracked \
+but no position yet), BUY (a position was just opened this cycle or is pending \
+fill), or IN_POSITION (already holding shares from an earlier cycle today). \
+active_thesis is the rationale carried forward from whichever cycle first \
+established the current status; initial_entry_price/current_target_price/ \
+current_stop_loss are only meaningful once IN_POSITION. recent_decisions is the \
+last few cycles' decisions for this ticker (bucket_start, decision, \
+confidence_score, thesis_continuity_flag, pattern_reasoning), oldest first.
+
+HYSTERESIS -- this is the most important rule in this prompt. Do not abandon an \
+active BUY, IN_POSITION, or HOLD status because of a single bar of noise. If \
+status is already HOLD or IN_POSITION with an active_thesis, your default is to \
+maintain that same call and set thesis_continuity_flag=true UNLESS one of these \
+specific invalidation criteria is met on the latest bucket:
+  1. Price has crossed the current_stop_loss boundary.
+  2. Primary momentum alignment has broken -- e.g. rsi_centerline_cross is "down" \
+against the position's direction, or vwap_cross is "down" (price lost the session \
+VWAP it was holding above).
+  3. A major, high-impact NEGATIVE catalyst headline just appeared in \
+catalyst_context that specifically undermines the active_thesis.
+Only when one of these is true should you set thesis_continuity_flag=false and, if \
+status is IN_POSITION, respond SELL. Ordinary intraday chop -- a red bar inside an \
+otherwise intact uptrend, a brief dip that doesn't touch current_stop_loss -- is \
+NOT sufficient grounds to flip.
+
+SELL is only ever appropriate when status is IN_POSITION (there is a real position \
+to exit); never respond SELL for a FLAT/HOLD ticker. BUY is only appropriate when \
+status is FLAT or HOLD (not already holding); if status is IN_POSITION, your only \
+choices are HOLD (continue holding) or SELL (exit now) -- a fresh BUY would double \
+up the position, which is never correct here.
+
+TRAILING TARGETS -- once IN_POSITION, target_sell_price/stop_loss_price may only \
+move in the position's favor (for a long: stop_loss up, target up), never the \
+other way. If you propose new target_sell_price/stop_loss_price values while \
+IN_POSITION and momentum still supports the thesis, they must be at or above the \
+current current_target_price/current_stop_loss respectively -- never suggest \
+lowering either on noise. If you have no better level than what's already active, \
+just repeat the current values back.
+
 Respond with a single JSON object matching this contract:
-- decision: "BUY" or "HOLD"
-- confidence_score: 0.0-1.0, how strongly the setup supports entering now
+- decision: "BUY", "HOLD", or "SELL" (see SELL/BUY eligibility above)
+- confidence_score: 0.0-1.0, how strongly the setup (or the continuing thesis) \
+supports this decision
 - buy_limit_price: required if decision is BUY -- a limit entry price near the \
 current ask, sized for immediate fill
 - target_sell_price: required if decision is BUY -- the intraday profit-target limit \
 sell price, greater than buy_limit_price
+- stop_loss_price: required if decision is BUY -- the protective exit price, below \
+buy_limit_price; this becomes current_stop_loss for every later cycle's hysteresis \
+check while the position is open
 - max_holding_time_minutes: required if decision is BUY -- max minutes to hold \
 before a mandatory exit
-- pattern_reasoning: a concise explanation of the order-flow setup you detected
+- pattern_reasoning: a concise explanation of the order-flow setup (or, for a \
+continuing HOLD/IN_POSITION, why the thesis still holds or why it just broke)
+- thesis_continuity_flag: true if the active thesis (if any) from position_context \
+still holds; false only when an invalidation criterion above was met this cycle
 
 If no valid intraday setup is present, or ticker_state_today shows this ticker \
 already has an open position or has hit its trade cap for the day, respond HOLD.
 """
-
-
-def _num(value: float | Decimal | None) -> float | None:
-    """Normalize a numeric bucket field to float.
-
-    Bucket rows read back from the DB come back as Decimal (state/models.py's
-    columns are SQLAlchemy Numeric, despite the `Mapped[float]` type hint), while
-    a freshly-built MetricBucket for the current bucket holds plain floats. Mixing
-    the two in one payload made json.dumps below raise "Object of type Decimal is
-    not JSON serializable" the moment lookback history was involved.
-    """
-    return None if value is None else float(value)
 
 
 def _bucket_to_dict(
@@ -179,6 +219,27 @@ def build_prompt(
             "today_open": today_open,
             "gap_pct": pct_change(today_open, prior_close),
         },
+    }
+    # Continuity context (requirements.md section 8) -- always present, unlike
+    # market_context/catalyst_context below, since status/decision_history are
+    # meaningful (if empty/FLAT) for every ticker on every cycle, not just when an
+    # optional side-fetch happened to succeed this cycle.
+    payload["position_context"] = {
+        "status": ticker_state.status,
+        "active_thesis": ticker_state.active_thesis,
+        "initial_entry_price": ticker_state.initial_entry_price,
+        "current_target_price": ticker_state.current_target_price,
+        "current_stop_loss": ticker_state.current_stop_loss,
+        "recent_decisions": [
+            {
+                "bucket_start": entry.bucket_start.isoformat(),
+                "decision": entry.decision,
+                "confidence_score": entry.confidence_score,
+                "thesis_continuity_flag": entry.thesis_continuity_flag,
+                "pattern_reasoning": entry.pattern_reasoning,
+            }
+            for entry in ticker_state.decision_history
+        ],
     }
     if ticker_state.market_benchmark_ticker:
         # Omitted entirely (not sent as an all-null section) when the benchmark

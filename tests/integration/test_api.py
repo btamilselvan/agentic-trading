@@ -102,6 +102,7 @@ async def test_manual_order_entry_opens_a_trade_in_dry_run(monkeypatch, client):
                 "ticker": "aapl",
                 "buy_limit_price": 100.0,
                 "target_sell_price": 102.0,
+                "stop_loss_price": 98.0,
                 "max_holding_time_minutes": 15,
             },
         )
@@ -151,6 +152,7 @@ async def test_manual_order_entry_in_live_mode_requires_confirm(monkeypatch, cli
                 "ticker": "AAPL",
                 "buy_limit_price": 100.0,
                 "target_sell_price": 102.0,
+                "stop_loss_price": 98.0,
             },
         )
         assert resp.status_code == 400
@@ -190,6 +192,7 @@ async def test_manual_order_entry_surfaces_broker_rejection_as_502(monkeypatch, 
                 "ticker": "CLOV",
                 "buy_limit_price": 4.11,
                 "target_sell_price": 4.20,
+                "stop_loss_price": 4.00,
             },
         )
         assert resp.status_code == 502
@@ -212,6 +215,7 @@ async def test_manual_order_entry_refuses_while_halted(monkeypatch, client):
                 "ticker": "AAPL",
                 "buy_limit_price": 100.0,
                 "target_sell_price": 102.0,
+                "stop_loss_price": 98.0,
             },
         )
         assert resp.status_code == 409

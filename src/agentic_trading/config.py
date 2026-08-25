@@ -135,6 +135,26 @@ class Settings(BaseSettings):
     # --- Alerts -------------------------------------------------------------
     webhook_url: str | None = None
 
+    # --- Stateful decision engine (Phase 3) ----------------------------------
+    # Redis holds per-ticker *working* evaluation state (status, active thesis,
+    # recent decision log) across poll cycles -- Postgres remains the durable
+    # audit trail (buckets/llm_decisions/orders/trades); Redis is deliberately
+    # ephemeral, keyed by (ticker, trade_date) and TTL'd so it can never leak
+    # across trading sessions even if explicit clearing is missed. See
+    # state/ticker_state_store.py.
+    redis_url: str = "redis://localhost:6379/0"
+    # How many past decisions (this ticker, today) are replayed into the prompt
+    # alongside the active thesis -- spec section 8 says 3-5.
+    decision_history_length: int = 5
+    ticker_state_ttl_hours: int = 24
+    # Once a position is open, a favorable trailing stop/target ratchet can be
+    # applied by cancelling and replacing the resting sell order at the new,
+    # more favorable price (never a less favorable one -- see
+    # execution/invalidation.py's compute_trailing_stop). The stop-loss/
+    # momentum-break forced-exit check itself is NOT gated by this flag; only
+    # the one-way ratchet's order replacement is.
+    trailing_stop_enabled: bool = True
+
 
 @lru_cache
 def get_settings() -> Settings:

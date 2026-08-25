@@ -8,12 +8,16 @@ services:
       # Overrides .env's OLLAMA_HOST=http://localhost:11434 -- inside this network,
       # "localhost" is the app container itself, not the ollama service.
       OLLAMA_HOST: http://ollama:11434
+      # Same reasoning for Redis (Phase 3 stateful decision engine) -- overrides
+      # .env's REDIS_URL=redis://localhost:6379/0.
+      REDIS_URL: redis://redis:6379/0
     ports:
       - "8000:8000"
     volumes:
       - ./.secrets:/app/.secrets
     depends_on:
       - ollama
+      - redis
 
   ollama:
     image: ollama/ollama:latest
@@ -22,5 +26,13 @@ services:
     volumes:
       - ollama_data:/root/.ollama
 
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+
 volumes:
   ollama_data:
+  redis_data:

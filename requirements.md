@@ -3,6 +3,7 @@
 ## Change Log & Revision History
 > **Instructions for Claude Code:** Always inspect this log first to see what was modified recently.
 
+* **v1.2.0 (2026-08-24):** Added Phase 3 requirements (Completed).
 * **v1.1.0 (2026-08-19):** Added Phase 2 requirements (Completed).
 * **v1.0.0 (2026-08-15):** Initial Phase 1 release (Completed).
 
@@ -77,7 +78,7 @@ An autonomous, lightweight intraday trading service built in Python (FastAPI) th
 
 ---
 
-## Phase 2: Enhanced Data Collection enhancements (WIP)
+## Phase 2: Enhanced Data Collection enhancements (Completed)
 
 ## 6. Data Collection (Completed)
 * **Metrics Ingested per 5-Minute Bucket:**
@@ -91,6 +92,43 @@ An autonomous, lightweight intraday trading service built in Python (FastAPI) th
 * **Short interest % is NOT implemented** -- neither robin_stocks nor the Robinhood API expose it (no field, no endpoint), and unlike buy/sell volume or book depth there's no reasonable OHLCV-only proxy for it. Would need a third-party data provider to add later.
 * RSI is implemented in plain Python (Wilder's smoothing) rather than Pandas-TA, since nothing else in this project uses pandas and the algorithm doesn't justify a first-time dependency for one indicator.
 * Session Time Context boundaries (30 / 120 minutes) aren't specified above, so they default to the existing `MARKET_OPEN_TIME`/`EVALUATION_WINDOW_END_TIME` poll window (09:30-11:30) rather than being separately configurable.
+
+
+## Phase 3: Stateful Decision Engine & Memory Persistence (Completed)
+
+### 7. Problem Statement & Objective
+In Phase 1 and 2, evaluating isolated 5-minute market metrics caused decision oscillation (e.g., flipping between `BUY` and `HOLD` across consecutive bars due to minor price noise). Phase 3 introduces stateful context persistence to ensure decisions maintain continuity, respect an active thesis, and enforce strict invalidation thresholds.
+
+### 8 Functional Requirements
+
+* **State Persistence & Storage:**
+  * Implement a lightweight local state store (Redis) to track active evaluation state per ticker across background scanning cycles.
+  * Maintain persistent state metadata including: `status` (`SELL`, `HOLD`, `BUY`, `IN_POSITION`), `active_thesis`, `initial_entry_price`, `target_price`, `stop_loss`, and `decision_history`.
+
+* **Contextual Payload Architecture:**
+  * For each 5-minute evaluation cycle, append the previous 3 to 5 decision logs and active thesis parameters into the LLM input prompt payload.
+  * Require the LLM to output both the updated signal/decision and a `thesis_continuity_flag` indicating whether the original trade rationale remains intact.
+
+* **State Transition & Invalidation Logic:**
+  * **Hysteresis Enforcement:** The LLM shall not abandon an active `BUY` or `IN_POSITION` or `HOLD` state due to single-bar noise unless an explicit invalidation criterion is met.
+  * **Invalidation Criteria:** State downgrades (e.g., `BUY` to `FLAT` or `EXIT`) require one of the following:
+    1. Underlying price crosses the calculated stop-loss boundary.
+    2. Primary momentum alignment breaks (e.g., RSI crosses below key support or loss of VWAP).
+    3. Major high-impact negative catalyst headline is detected.
+
+* **Trailing Target & Exit Management:**
+  * Once a position is established, the agent shall retain fixed baseline profit and stop targets.
+  * Target adjustments are strictly limited to one-way trailing stops (ratcheting upward for long positions); downward adjustments to profit targets on noise are prohibited.
+
+### Implementation Notes
+
+* The "lightweight local state store" is Redis (`REDIS_URL`, `state/ticker_state_store.py`), holding only the ephemeral working state this section describes (`status`/`active_thesis`/`decision_history`/stop/target) -- it is deliberately *not* the audit trail. Postgres remains that (`Trade.stop_loss_price`/`exit_reason`, `LlmDecision.stop_loss_price`/`thesis_continuity_flag`, migration `0005_add_stop_loss_exit`); if Redis state is ever lost or expired mid-position, `scheduler.py` rebuilds it from the `Trade` row rather than treating the ticker as `FLAT`. Redis state is keyed by `(ticker, trade_date)` and TTL'd (`TICKER_STATE_TTL_HOURS`, default 24h) as a belt-and-suspenders guard against ever leaking into a later session, in addition to being explicitly cleared on trade close.
+* `decision_history` length is configurable (`DECISION_HISTORY_LENGTH`, default 5, within the spec's 3-5 range).
+* Invalidation criteria 1 (stop-loss) and 2 (momentum break) are code-enforced (`execution/invalidation.py`'s `evaluate_exit_guardrails`), checked *before* any LLM call each cycle and able to force an exit even against an LLM `HOLD` -- consistent with this codebase's existing guardrail philosophy that safety-critical checks are never merely advisory. Criterion 3 (a negative catalyst headline) has no code-side check, since there is no sentiment classifier available (see `market_data/robinhood_client.py`'s news integration) -- it is judged entirely by the LLM via `thesis_continuity_flag`/`SELL`.
+* The spec's `SELL`/`FLAT`/`EXIT` state-downgrade language is implemented as: `TradeDecision.decision` gains a third value, `SELL` -- meaningful only when a position is already `IN_POSITION` -- and a downgrade is any of (a) `evaluate_exit_guardrails` forcing an exit, or (b) the LLM responding `SELL` or `thesis_continuity_flag=false`. Either path calls `execution/order_manager.py`'s `try_exit_position_early` (cancels the resting target-sell order, places an immediate marketable exit) with the triggering reason recorded on `Trade.exit_reason`.
+* The one-way trailing-stop ratchet (`execution/invalidation.py`'s `compute_trailing_stop`, applied via `execution/order_manager.py`'s `apply_trailing_stop`) is on by default (`TRAILING_STOP_ENABLED=true`) but operator-configurable off, in which case a position's stop/target stay exactly as set at entry for its whole lifetime -- the deterministic stop-loss/momentum invalidation check above still runs regardless of this flag either way.
+
+---
 
 ## References
 * [Robinhood API Documentation](https://robinhood.com/us/en/support/articles/robinhood-api/)

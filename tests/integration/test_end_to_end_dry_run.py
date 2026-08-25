@@ -7,6 +7,15 @@ No live Robinhood credentials or Ollama server are available here, so:
     against real local HTTP servers standing in for Ollama and a Slack-style
     webhook receiver, so OllamaClient and WebhookNotifier's actual HTTP code paths
     get exercised over the wire, not just asserted against a mocked transport.
+  - Phase 3's ticker-state store (state.ticker_state_store) is likewise NOT faked
+    here -- it talks to a real Redis at REDIS_URL (default localhost:6379, same
+    default as .env.example), same treatment as DATABASE_URL. The
+    `_ticker_state_cleanup` fixture below clears this test's key before and after
+    so repeat runs don't inherit stale state and nothing is left behind in a real
+    Redis instance. (Everywhere else -- tests/integration/test_scheduler.py --
+    intentionally uses InMemoryTickerStateStore instead, for isolation/no
+    external dependency; this file is the one place that exercises the real
+    client, matching its "real infra, not mocks" philosophy for Ollama/webhook.)
 
 This is the manual DRY_RUN validation called for in the implementation plan's
 Verification section, automated so it re-runs on every test invocation instead of
@@ -35,12 +44,22 @@ from agentic_trading.market_data.robinhood_client import HistoricalBar, Quote
 from agentic_trading.state import repository as repo
 from agentic_trading.state.db import session_scope
 from agentic_trading.state.models import LlmDecision
+from agentic_trading.state.ticker_state_store import get_ticker_state_store
 
 pytestmark = pytest.mark.asyncio
 
 OLLAMA_PORT = 8799
 WEBHOOK_PORT = 8798
 TICKER = "AAPL"
+TRADE_DATE = date(2026, 8, 17)
+
+
+@pytest.fixture(autouse=True)
+async def _ticker_state_cleanup():
+    store = get_ticker_state_store()
+    await store.clear(TICKER, TRADE_DATE)
+    yield
+    await store.clear(TICKER, TRADE_DATE)
 
 
 def _run_uvicorn(app: FastAPI, port: int) -> None:
@@ -64,8 +83,10 @@ def fake_ollama_server():
             "confidence_score": 0.91,
             "buy_limit_price": 100.5,
             "target_sell_price": 102.0,
+            "stop_loss_price": 99.0,
             "max_holding_time_minutes": 30,
             "pattern_reasoning": f"breakout detected for prompt of length {len(prompt)}",
+            "thesis_continuity_flag": True,
         }
         return {"message": {"role": "assistant", "content": json.dumps(decision)}}
 
@@ -177,3 +198,15 @@ async def test_full_dry_run_cycle_over_real_http_llm_and_webhook(
 
     async with session_scope() as session:
         assert (await repo.get_open_trades(session, ticker=TICKER)) == []
+
+    # 5. Phase 3: the ticker's continuity state round-tripped through a real Redis
+    #    too, not a fake -- DryRunBrokerClient filled both legs instantly within
+    #    this one cycle, so by the time _record_entry_decision ran the position
+    #    was already closed again (status HOLD, not IN_POSITION -- see
+    #    scheduler._poll_ticker's re-check comment), but the decision still landed
+    #    in the ticker's history for next cycle's continuity/hysteresis context.
+    ticker_state = await get_ticker_state_store().get(TICKER, TRADE_DATE)
+    assert ticker_state is not None
+    assert ticker_state.status == "HOLD"
+    assert len(ticker_state.decision_history) == 1
+    assert ticker_state.decision_history[0].decision == "BUY"

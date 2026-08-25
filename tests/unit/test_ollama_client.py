@@ -13,8 +13,10 @@ _VALID_DECISION_JSON = json.dumps(
         "confidence_score": 0.9,
         "buy_limit_price": 100.0,
         "target_sell_price": 102.0,
+        "stop_loss_price": 98.0,
         "max_holding_time_minutes": 20,
         "pattern_reasoning": "breakout",
+        "thesis_continuity_flag": True,
     }
 )
 

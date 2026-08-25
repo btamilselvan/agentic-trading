@@ -29,9 +29,9 @@ component, logical, and deployment architecture diagrams.
 
 | Mode | You need |
 |---|---|
-| Local | [uv](https://docs.astral.sh/uv/) (manages the Python 3.14+ install and venv for you), a Postgres database (e.g. [Supabase](https://supabase.com)), [Ollama](https://ollama.com) running locally **or** an [Ollama Cloud](https://ollama.com) API key — see [LLM backend](#llm-backend-local-vs-ollama-cloud) |
-| Docker Compose | Docker + Docker Compose, a Postgres database (remote/Supabase — not containerized here) |
-| Production | A container host/orchestrator, a production Postgres, a Robinhood account, a funded Robinhood **Agentic** account for `MODE=LIVE` |
+| Local | [uv](https://docs.astral.sh/uv/) (manages the Python 3.14+ install and venv for you), a Postgres database (e.g. [Supabase](https://supabase.com)), a Redis instance (e.g. `docker run -d -p 6379:6379 redis:7-alpine`), [Ollama](https://ollama.com) running locally **or** an [Ollama Cloud](https://ollama.com) API key — see [LLM backend](#llm-backend-local-vs-ollama-cloud) |
+| Docker Compose | Docker + Docker Compose, a Postgres database (remote/Supabase — not containerized here; Redis *is* containerized, see below) |
+| Production | A container host/orchestrator, a production Postgres, a production Redis, a Robinhood account, a funded Robinhood **Agentic** account for `MODE=LIVE` |
 
 This repo is set up as a `uv` project (`pyproject.toml` + `uv.lock`) — `uv` resolves and pins exact
 dependency versions in `uv.lock` and provisions an isolated `.venv` automatically; you don't create or
@@ -56,6 +56,11 @@ Then fill in at least:
 - `DATABASE_URL` — an async Postgres connection string (`postgresql+asyncpg://...`). Defaults to a local
   Postgres; point it at your Supabase project's connection string (Session Pooler recommended) or any
   other Postgres-compatible host.
+- `REDIS_URL` — a Redis connection string. Defaults to a local Redis (`redis://localhost:6379/0`); point
+  it at any Redis-compatible host (Upstash, Redis Cloud, ElastiCache, ...) the same way `DATABASE_URL`
+  points at any Postgres-compatible host. Holds Phase 3's per-ticker continuity state (active thesis,
+  decision history, stop/target levels) across poll cycles — ephemeral working memory, not the audit
+  trail (that's still Postgres); see `state/ticker_state_store.py`.
 - `ROBINHOOD_USERNAME` / `ROBINHOOD_PASSWORD` — for market-data polling only. On first run, `robin_stocks`
   prompts for an MFA code on stdin unless a cached session already exists at `ROBINHOOD_TOKEN_PATH`.
 - `WATCHLIST` — comma-separated tickers to trade.
@@ -185,9 +190,10 @@ automatically on every invocation.
 
 ## Run with Docker Compose
 
-Docker Compose runs the app **and** a local Ollama container together; Postgres stays external (point
-`DATABASE_URL` at Supabase or another remote instance — it isn't containerized here, since it's meant to
-be a durable store you don't want tied to `docker compose down`).
+Docker Compose runs the app, a local Ollama container, **and** a local Redis container together; Postgres
+stays external (point `DATABASE_URL` at Supabase or another remote instance — it isn't containerized
+here, since it's meant to be a durable store you don't want tied to `docker compose down`). Redis *is*
+containerized by default since it's ephemeral working memory, not a durable store — see `REDIS_URL` above.
 
 ```bash
 cp .env.example .env   # fill in DATABASE_URL, ROBINHOOD_*, WATCHLIST, etc.
@@ -196,8 +202,9 @@ docker compose up --build
 
 Notes:
 
-- The compose file overrides `OLLAMA_HOST` to `http://ollama:11434` regardless of what's in `.env`, since
-  inside the compose network `localhost` refers to the app container itself, not the `ollama` service.
+- The compose file overrides `OLLAMA_HOST` to `http://ollama:11434` and `REDIS_URL` to
+  `redis://redis:6379/0` regardless of what's in `.env`, since inside the compose network `localhost`
+  refers to the app container itself, not the `ollama`/`redis` services.
 - `./.secrets` is bind-mounted into the container so the Robinhood session pickle and MCP OAuth token
   (see [Going live](#going-live)) persist across container restarts.
 - First run needs the model pulled into the `ollama` container once:
@@ -220,8 +227,9 @@ Notes:
   docker compose exec app alembic upgrade head
   ```
 
-- Tear down with `docker compose down`; add `-v` to also drop the `ollama_data` volume (re-pull the model
-  next time).
+- Tear down with `docker compose down`; add `-v` to also drop the `ollama_data`/`redis_data` volumes
+  (re-pull the model next time; Redis's volume only matters for surviving a container restart mid-day,
+  since it's ephemeral working memory anyway).
 
 ## Run in production
 
@@ -247,6 +255,10 @@ Production-specific points:
   see [Switching LLM providers](#switching-llm-providers).
 - **Database:** use your real Postgres (Supabase or otherwise) via `DATABASE_URL`; run
   `alembic upgrade head` as a release step before starting new containers, not automatically on boot.
+- **Redis:** use a real Redis (Upstash, Redis Cloud, ElastiCache, or self-hosted) via `REDIS_URL` — it's
+  working memory, not the audit trail, so it doesn't need the same backup/durability rigor as Postgres,
+  but it does need to actually be reachable (Phase 3's continuity/hysteresis logic reads/writes it every
+  poll cycle).
 - **Secrets:** `.secrets/` holds the Robinhood session pickle and the MCP OAuth token — treat it like any
   other credential store (mounted volume backed by your platform's secret storage, not baked into the
   image). Never commit it; it's already in `.gitignore`.
@@ -336,11 +348,12 @@ add one branch to `get_llm_client()` in the same file — no other module needs 
 # Unit tests -- pure logic, no network or DB
 uv run pytest tests/unit -q
 
-# Integration tests -- need a real Postgres
+# Integration tests -- need a real Postgres, and (for one test suite) a real Redis
 docker run -d --name agentic-trading-test-pg -e POSTGRES_PASSWORD=postgres \
     -e POSTGRES_DB=agentic_trading -p 55432:5432 postgres:16-alpine
 export DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:55432/agentic_trading
 uv run alembic upgrade head
+docker run -d --name agentic-trading-test-redis -p 6379:6379 redis:7-alpine
 uv run pytest tests/integration -q
 
 # Everything
@@ -352,8 +365,12 @@ uv run ruff check --fix src/ tests/ scripts/   # autofix
 ```
 
 `tests/integration/test_end_to_end_dry_run.py` is the closest thing to an automated version of the
-"run a real `MODE=DRY_RUN` session" check: it exercises the real Ollama client and real webhook notifier
-over real local HTTP servers (only market data is stubbed, since that needs live Robinhood credentials).
+"run a real `MODE=DRY_RUN` session" check: it exercises the real Ollama client, real webhook notifier, and
+real Redis-backed ticker-state store over real local HTTP servers / a real Redis at `REDIS_URL` (only
+market data is stubbed, since that needs live Robinhood credentials) — it cleans up its own Redis key
+before and after. Everywhere else, integration tests use `InMemoryTickerStateStore` (an in-memory fake,
+same role as `DryRunBrokerClient`) instead of talking to Redis at all, so `tests/integration` as a whole
+only *requires* Redis to be reachable for that one file; the rest run fine without it.
 
 ## API reference
 

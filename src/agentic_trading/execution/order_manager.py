@@ -27,7 +27,14 @@ from agentic_trading.execution.broker_mcp_client import (
 from agentic_trading.execution.guardrails import evaluate_buy_guardrails, is_order_timed_out
 from agentic_trading.llm.schema import TradeDecision
 from agentic_trading.state import repository as repo
-from agentic_trading.state.models import Order, OrderSide, OrderStatus, Trade, TradingModeEnum
+from agentic_trading.state.models import (
+    Order,
+    OrderSide,
+    OrderStatus,
+    Trade,
+    TradeStatus,
+    TradingModeEnum,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -144,14 +151,21 @@ async def try_enter_position(
         logger.info("Guardrail blocked BUY for %s: %s", ticker, guardrail_result.reason)
         return TradeEntryOutcome(opened=False, reason=guardrail_result.reason)
 
-    logger.info("All guardrails cleared for %s BUY order, quantity %s limit_price %s", ticker, quantity, decision.buy_limit_price)
+    logger.info(
+        "All guardrails cleared for %s BUY order, quantity %s limit_price %s",
+        ticker,
+        quantity,
+        decision.buy_limit_price,
+    )
 
     review = await broker.review_order(
         ticker=ticker, side="buy", quantity=quantity, limit_price=decision.buy_limit_price
     )
-    
-    logger.info("Placing BUY order for %s (qty=%s @ $%s)", ticker, quantity, decision.buy_limit_price)
-    
+
+    logger.info(
+        "Placing BUY order for %s (qty=%s @ $%s)", ticker, quantity, decision.buy_limit_price
+    )
+
     if review.warnings:
         logger.warning("Broker review warnings for %s BUY: %s", ticker, review.warnings)
 
@@ -176,6 +190,7 @@ async def try_enter_position(
         quantity=quantity,
         llm_decision_id=llm_decision_id,
         target_sell_price=decision.target_sell_price,
+        stop_loss_price=decision.stop_loss_price,
         max_holding_time_minutes=decision.max_holding_time_minutes,
     )
     order.trade_id = trade.id
@@ -225,16 +240,29 @@ async def _place_paired_sell(
     )
     if placed.status == "filled":
         fill_price = placed.fill_price or float(trade.target_sell_price)
-        await _close_trade_from_sell(session, trade, sell_order, fill_price, notifier)
+        await _close_trade_from_sell(
+            session, trade, sell_order, fill_price, notifier, exit_reason="TARGET_HIT"
+        )
 
 
 async def _close_trade_from_sell(
-    session: AsyncSession, trade: Trade, sell_order: Order, fill_price: float, notifier: Notifier
+    session: AsyncSession,
+    trade: Trade,
+    sell_order: Order,
+    fill_price: float,
+    notifier: Notifier,
+    *,
+    exit_reason: str | None = None,
 ) -> None:
     await _mark_order_filled(session, sell_order, fill_price, notifier)
     pnl = (fill_price - float(trade.entry_price)) * float(trade.quantity)
     await repo.close_trade(
-        session, trade.id, exit_price=fill_price, closed_at=datetime.now(UTC), pnl=pnl
+        session,
+        trade.id,
+        exit_price=fill_price,
+        closed_at=datetime.now(UTC),
+        pnl=pnl,
+        exit_reason=exit_reason,
     )
     await repo.record_trade_closed(session, trade.ticker, trade.trade_date, pnl=pnl)
     await notifier.notify(
@@ -244,8 +272,182 @@ async def _close_trade_from_sell(
             "entry_price": float(trade.entry_price),
             "exit_price": fill_price,
             "pnl": pnl,
+            "exit_reason": exit_reason,
         },
     )
+
+
+def _pending_sell_order(trade: Trade) -> Order | None:
+    """The trade's resting SELL order, if one is still PENDING -- requires
+    trade.orders to already be eager-loaded (see repo.get_open_trade_for_ticker)."""
+    return next(
+        (o for o in trade.orders if o.side == OrderSide.SELL and o.status == OrderStatus.PENDING),
+        None,
+    )
+
+
+def _trade_mode(trade: Trade) -> TradingModeEnum:
+    """Mode (DRY_RUN/LIVE) is recorded per-Order, not per-Trade, but every order
+    for one trade always carries the same mode -- so any existing order (there's
+    always at least the BUY leg once a trade exists) tells us which, without
+    needing to re-derive it from ambient settings."""
+    if not trade.orders:
+        raise ValueError(f"Trade {trade.id} has no orders to infer its trading mode from")
+    return trade.orders[0].mode
+
+
+async def try_exit_position_early(
+    session: AsyncSession,
+    broker: BrokerExecutionClient,
+    *,
+    trade: Trade,
+    exit_price: float,
+    exit_reason: str,
+    notifier: Notifier | None = None,
+) -> bool:
+    """Phase 3 (requirements.md section 8): force-closes an OPEN position ahead of
+    its resting target sell -- called by scheduler.py when
+    execution.invalidation.evaluate_exit_guardrails forces an exit (STOP_LOSS/
+    MOMENTUM_BREAK), or the LLM itself signals SELL with thesis_continuity_flag
+    false for an IN_POSITION ticker (an LLM-judged catalyst, or its own read of the
+    setup). `exit_price` is a marketable price (e.g. current bid) the caller is
+    responsible for fetching, same pattern as liquidate_all_open_positions'
+    `liquidation_prices`.
+
+    `trade` must come from repo.get_open_trade_for_ticker (trade.orders needs to
+    already be eager-loaded). Cancels the resting target-sell order first, if one
+    is still pending, so it can't fill out from under this new exit order.
+
+    Returns True once an exit order has been placed (whether or not it filled
+    instantly -- an unfilled exit is still picked up by the ordinary
+    poll_pending_sell_orders sweep next tick, same as any other pending sell).
+    Returns False without doing anything if the trade is no longer OPEN, or the
+    broker reports no position left to sell (both are races with something else
+    having already closed it out this same cycle).
+    """
+    notifier = notifier or _NULL_NOTIFIER
+    if trade.status != TradeStatus.OPEN:
+        logger.info(
+            "try_exit_position_early: trade %s (%s) is no longer OPEN -- nothing to do",
+            trade.id,
+            trade.ticker,
+        )
+        return False
+
+    position_qty = await broker.get_open_position_quantity(trade.ticker)
+    if position_qty <= 0:
+        logger.info(
+            "try_exit_position_early: %s has no open broker position -- nothing to exit",
+            trade.ticker,
+        )
+        return False
+
+    pending_sell = _pending_sell_order(trade)
+    if pending_sell is not None:
+        if pending_sell.broker_order_id:
+            await broker.cancel_order(pending_sell.broker_order_id)
+        await repo.update_order_status(
+            session, pending_sell.id, OrderStatus.CANCELLED, cancelled_at=datetime.now(UTC)
+        )
+
+    logger.info(
+        "Forcing early exit for %s (trade %s): %s @ ~$%s",
+        trade.ticker,
+        trade.id,
+        exit_reason,
+        exit_price,
+    )
+    placed = await broker.place_order(
+        ticker=trade.ticker, side="sell", quantity=position_qty, limit_price=exit_price
+    )
+    sell_order = await repo.create_order(
+        session,
+        ticker=trade.ticker,
+        side=OrderSide.SELL,
+        limit_price=exit_price,
+        quantity=position_qty,
+        mode=_trade_mode(trade),
+        broker_order_id=placed.broker_order_id,
+        trade_id=trade.id,
+    )
+    if placed.status == "filled":
+        fill_price = placed.fill_price or exit_price
+        await _close_trade_from_sell(
+            session, trade, sell_order, fill_price, notifier, exit_reason=exit_reason
+        )
+    return True
+
+
+async def apply_trailing_stop(
+    session: AsyncSession,
+    broker: BrokerExecutionClient,
+    *,
+    trade: Trade,
+    new_target: float,
+    new_stop: float,
+    notifier: Notifier | None = None,
+) -> None:
+    """Phase 3 one-way trailing-stop ratchet (requirements.md section 8). Callers
+    (scheduler.py, gated by settings.trailing_stop_enabled) are responsible for
+    ensuring new_target/new_stop are never less favorable than the trade's current
+    values -- see execution.invalidation.compute_trailing_stop -- this function
+    just applies whatever it's given.
+
+    Only a raised target touches the broker: stop_loss is purely a Python-side
+    check each cycle (execution.invalidation.evaluate_exit_guardrails), not a
+    resting order, so trailing it up is a pure data update. A raised target means
+    cancelling the old resting sell and placing a new one at the higher price --
+    `trade` must come from repo.get_open_trade_for_ticker (orders eager-loaded).
+    """
+    notifier = notifier or _NULL_NOTIFIER
+    current_target = float(trade.target_sell_price) if trade.target_sell_price is not None else None
+    target_raised = current_target is None or new_target > current_target
+
+    if target_raised:
+        pending_sell = _pending_sell_order(trade)
+        if pending_sell is not None:
+            if pending_sell.broker_order_id:
+                await broker.cancel_order(pending_sell.broker_order_id)
+            await repo.update_order_status(
+                session, pending_sell.id, OrderStatus.CANCELLED, cancelled_at=datetime.now(UTC)
+            )
+            placed = await broker.place_order(
+                ticker=trade.ticker,
+                side="sell",
+                quantity=float(pending_sell.quantity),
+                limit_price=new_target,
+            )
+            sell_order = await repo.create_order(
+                session,
+                ticker=trade.ticker,
+                side=OrderSide.SELL,
+                limit_price=new_target,
+                quantity=float(pending_sell.quantity),
+                mode=pending_sell.mode,
+                broker_order_id=placed.broker_order_id,
+                trade_id=trade.id,
+            )
+            if placed.status == "filled":
+                fill_price = placed.fill_price or new_target
+                await _close_trade_from_sell(
+                    session, trade, sell_order, fill_price, notifier, exit_reason="TARGET_HIT"
+                )
+            logger.info(
+                "Trailed target up for %s (trade %s): %s -> %s",
+                trade.ticker,
+                trade.id,
+                current_target,
+                new_target,
+            )
+        # else: no resting sell to replace (e.g. still mid-retry via
+        # retry_missing_paired_sells) -- update_trade_trailing_levels below still
+        # records the new target, so whenever that sell does get placed it uses
+        # the trailed value.
+
+    if trade.status == TradeStatus.OPEN:
+        await repo.update_trade_trailing_levels(
+            session, trade.id, target_sell_price=new_target, stop_loss_price=new_stop
+        )
 
 
 async def poll_pending_buy_orders(
@@ -320,6 +522,13 @@ async def poll_pending_sell_orders(
             if position_qty <= 0:
                 trade = await session.get(Trade, order.trade_id)
                 if trade is not None:
+                    # exit_reason intentionally left unset here: this generic
+                    # fill-detection path can't tell whether `order` was the
+                    # ordinary paired target sell, a trailed-up target sell, or
+                    # an early-exit sell from try_exit_position_early -- all look
+                    # identical once resting at the broker. Only the callers that
+                    # already know for certain (an instant-fill right after
+                    # placing) pass an explicit exit_reason.
                     await _close_trade_from_sell(
                         session, trade, order, float(order.limit_price), notifier
                     )
@@ -423,7 +632,9 @@ async def liquidate_all_open_positions(
                 trade_id=trade.id,
             )
             fill_price = placed.fill_price or price
-            await _close_trade_from_sell(session, trade, sell_order, fill_price, notifier)
+            await _close_trade_from_sell(
+                session, trade, sell_order, fill_price, notifier, exit_reason="EOD"
+            )
         except Exception:
             logger.exception(
                 "EOD: failed to liquidate trade %s (%s) -- position may remain open "
