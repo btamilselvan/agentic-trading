@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import robin_stocks.robinhood as rh
@@ -26,29 +26,65 @@ from agentic_trading.config import get_settings
 
 _logged_in = False
 
+# Every full (non-cached-pickle) robin_stocks login mints a brand-new random device_token
+# (see robin_stocks.robinhood.authentication.login), so retrying on every single caller
+# that needs a session -- once per poll cycle for market context, again per ticker for
+# bars/quote/news/float -- looks to Robinhood like a burst of logins from a different new
+# device each time, which risks the login endpoint itself throttling/rejecting the
+# request. This cooldown caps retries to roughly once per window instead of once per
+# caller, so a login outage (or a device-verification challenge nobody's approved yet)
+# doesn't turn into a login hammer.
+_LOGIN_RETRY_COOLDOWN = timedelta(seconds=90)
+_login_retry_after: datetime | None = None
+
 logger = logging.getLogger(__name__)
 
 def ensure_login() -> None:
-    """Log in once per process, reusing a cached session pickle if present.
+    """Best-effort login once per process (retried at most once per cooldown window
+    after a failure), reusing a cached session pickle if present.
+
+    None of the robin_stocks calls this module makes (get_stock_historicals,
+    get_quotes, get_news, get_fundamentals) are @login_required in the installed
+    robin_stocks version (3.4.0, robinhood/stocks.py) -- Robinhood serves this
+    market data without an authenticated session. So a failed login here is logged
+    and swallowed, not fatal: raising would break otherwise-working market-data
+    polling over a session this module's actual calls don't need. (If a genuinely
+    account-scoped, login-gated endpoint is ever added to this module, this needs
+    revisiting -- that call would silently get an unauthenticated 401 instead.)
 
     On first run (no cached session), robin_stocks will prompt for an MFA code on
-    stdin — this must be run interactively at least once before the scheduler relies
-    on it unattended.
+    stdin — run interactively at least once if you want a session pickle in place
+    before unattended use.
     """
-    global _logged_in
+    global _logged_in, _login_retry_after
     if _logged_in:
+        return
+    now = datetime.now(UTC)
+    if _login_retry_after is not None and now < _login_retry_after:
         return
     settings = get_settings()
     token_path = Path(settings.robinhood_token_path)
     token_path.parent.mkdir(parents=True, exist_ok=True)
-    rh.login(
+    login_result = rh.login(
         username=settings.robinhood_username,
         password=settings.robinhood_password,
         store_session=True,
         pickle_path=str(token_path.parent),
         pickle_name=token_path.stem,
     )
+    if not login_result or "access_token" not in login_result:
+        logger.warning(
+            "Robinhood login did not return a session (see robin_stocks' own "
+            "'Login failed'/'Error during login verification' output above for the "
+            "underlying cause -- typically a stale session pickle plus an unapproved "
+            "device-verification challenge). Proceeding unauthenticated since none of "
+            "this module's market-data calls require a login; retrying in %ss.",
+            _LOGIN_RETRY_COOLDOWN.seconds,
+        )
+        _login_retry_after = now + _LOGIN_RETRY_COOLDOWN
+        return
     _logged_in = True
+    _login_retry_after = None
 
 
 @dataclass(frozen=True)
