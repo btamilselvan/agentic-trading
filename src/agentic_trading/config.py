@@ -159,6 +159,22 @@ class Settings(BaseSettings):
     # the one-way ratchet's order replacement is.
     trailing_stop_enabled: bool = True
 
+    # --- Schwab market data (schwab-py, Phase 4) -----------------------------
+    # Primary quote/5-min-historicals source (market_data/schwab_client.py), with
+    # market_data/market_data_client.py falling back to robinhood_client.py on any
+    # failure -- see requirements.md Phase 4. Auth is the standard Schwab OAuth
+    # app-key/secret + one-time browser consent, handled by
+    # scripts/bootstrap_schwab_oauth.py (schwab-py's easy_client); the running app
+    # only ever reads the cached token file (client_from_token_file), it never
+    # opens a browser itself.
+    schwab_client_id: str | None = None
+    schwab_client_secret: str | None = None
+    # Must exactly match the callback URL configured in the Schwab developer app
+    # (including scheme/port/trailing slash) -- Schwab requires HTTPS here, unlike
+    # Robinhood's MCP OAuth flow.
+    schwab_callback_url: str = "https://127.0.0.1:8182"
+    schwab_token_path: str = ".secrets/schwab_token.json"
+
 
 @lru_cache
 def get_settings() -> Settings:

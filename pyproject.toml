@@ -17,6 +17,7 @@ dependencies = [
     "mcp>=2.0",
     "httpx2>=2.0",
     "redis>=5.0",
+    "schwab-py>=1.5.1",
 ]
 
 [project.optional-dependencies]

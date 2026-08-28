@@ -35,6 +35,24 @@ _HOLD_DECISION = TradeDecision(decision="HOLD", confidence_score=0.2, thesis_con
 
 
 @pytest.fixture(autouse=True)
+def _no_schwab(monkeypatch):
+    """scheduler.py now calls market_data.market_data_client (Schwab-primary,
+    Robinhood-fallback) instead of robinhood_client directly (Phase 4). Every test
+    below still monkeypatches scheduler.rh.get_quote/get_5min_historicals -- that
+    keeps working because market_data_client falls back to the same robinhood_client
+    module object, but only if Schwab itself reports unavailable first. Force that
+    deterministically here rather than relying on SCHWAB_CLIENT_ID/SECRET happening
+    to be unset in whatever environment the suite runs in.
+    """
+    monkeypatch.setattr(scheduler.mdc.schwab_client, "get_quote", lambda ticker: None)
+    monkeypatch.setattr(
+        scheduler.mdc.schwab_client,
+        "get_5min_historicals",
+        lambda ticker, start_datetime, end_datetime: [],
+    )
+
+
+@pytest.fixture(autouse=True)
 def _fake_ticker_state_store(monkeypatch):
     """run_poll_cycle defaults its ticker_state_store via
     scheduler.get_ticker_state_store() when the caller doesn't pass one -- every

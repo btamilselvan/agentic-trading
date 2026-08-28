@@ -52,7 +52,7 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Protocol, runtime_checkable
 
-from agentic_trading.market_data.robinhood_client import HistoricalBar, Quote
+from agentic_trading.market_data.models import HistoricalBar, Quote
 
 
 @runtime_checkable

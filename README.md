@@ -17,6 +17,7 @@ component, logical, and deployment architecture diagrams.
 - [Prerequisites](#prerequisites)
 - [Configuration](#configuration)
 - [LLM backend: local vs. Ollama Cloud](#llm-backend-local-vs-ollama-cloud)
+- [Schwab market data (primary source)](#schwab-market-data-primary-source)
 - [Run locally (no Docker)](#run-locally-no-docker)
 - [Run with Docker Compose](#run-with-docker-compose)
 - [Run in production](#run-in-production)
@@ -41,7 +42,9 @@ container — see [Run in production](#run-in-production).
 
 All modes need a Robinhood account for market data (`robin_stocks`, unofficial — used read-only) and,
 for `MODE=LIVE` only, the official Robinhood Trading MCP linked via a one-time OAuth step (see
-[Going live](#going-live)).
+[Going live](#going-live)). A Schwab developer app is optional but recommended in every mode: it's the
+primary quote/5-min-historicals source (Phase 4), with Robinhood as the automatic fallback — see
+[Schwab market data](#schwab-market-data-primary-source).
 
 ## Configuration
 
@@ -76,6 +79,9 @@ Then fill in at least:
   it's never auto-selected. `scripts/bootstrap_mcp_oauth.py` prints your accounts (with
   `agentic_allowed`) at the end of the OAuth flow — use the one with `agentic_allowed=true`, not your
   main brokerage account. Unset is fine in `MODE=DRY_RUN`.
+- `SCHWAB_CLIENT_ID` / `SCHWAB_CLIENT_SECRET` — optional; the primary market-data source when set (falls
+  back to Robinhood automatically otherwise, or on any Schwab failure). See
+  [Schwab market data](#schwab-market-data-primary-source).
 
 Everything else (guardrail thresholds, schedule, LLM provider/model) has a sensible default — see
 `.env.example` for the full list and `config.py` for descriptions.
@@ -137,6 +143,47 @@ request; `OllamaClient` strips this automatically before parsing, so no extra co
 Docker Compose forces `OLLAMA_HOST` to its own local `ollama` container regardless of `.env` (see
 [Run with Docker Compose](#run-with-docker-compose)) — to use Ollama Cloud under Compose, remove that
 override from `docker-compose.yml` and keep `OLLAMA_API_KEY` set in `.env`.
+
+## Schwab market data (primary source)
+
+Phase 4: [Schwab's Market Data Production API](https://developer.schwab.com) (via `schwab-py`) is the
+primary source for quotes and 5-minute historicals — `robin_stocks` becomes the automatic fallback
+(`market_data/market_data_client.py`), used whenever Schwab is unconfigured, unauthorized, or a call
+fails. News and float shares stay Robinhood-only either way; Schwab has no equivalent feed for those.
+
+1. Register an app at [developer.schwab.com](https://developer.schwab.com) and request Market Data
+   Production access. Set a callback URL — Schwab requires HTTPS, e.g. `https://127.0.0.1:8182`.
+2. Set `SCHWAB_CLIENT_ID`, `SCHWAB_CLIENT_SECRET`, and `SCHWAB_CALLBACK_URL` (matching the app's
+   configured callback URL exactly) in `.env`.
+3. Complete the one-time browser consent:
+
+   ```bash
+   uv run scripts/bootstrap_schwab_oauth.py
+   ```
+
+   This uses `schwab-py`'s `easy_client`, which opens a browser, catches its own callback, and writes the
+   token to `SCHWAB_TOKEN_PATH` (default `.secrets/schwab_token.json`). The running app never performs
+   this interactive step itself — it only reads the cached token and lets `schwab-py` refresh it silently.
+
+The access token underneath is short-lived, but `schwab-py`'s session auto-refreshes it (via the refresh
+token) on every real API call and rewrites `SCHWAB_TOKEN_PATH` in place — no extra steps needed in normal
+operation. To force that refresh explicitly (e.g. a daily cron, so the token never goes long-idle over a
+quiet weekend) without waiting for a live market-data call:
+
+```bash
+uv run scripts/refresh_schwab_token.py
+```
+
+This doesn't need a browser — it just exercises the refresh token already on disk. It does **not**
+extend the refresh token's own ~7-day absolute lifetime, though: once that's gone (roughly a week of
+disuse), only step 3 above (the full interactive browser flow) gets a new one — re-run
+`bootstrap_schwab_oauth.py` periodically for that. Either way, a stale/expired token just means
+`market_data_client.py` falls back to Robinhood until it's refreshed, not an outage. Check
+`GET /market-data/schwab/{ticker}` at any time to verify Schwab connectivity directly, independent of
+which provider the trading pipeline actually used on its last poll.
+
+If `SCHWAB_CLIENT_ID`/`SCHWAB_CLIENT_SECRET` are left unset, the app runs exactly as it did before Phase
+4 — Robinhood market data only, no Schwab calls attempted.
 
 ## Run locally (no Docker)
 
@@ -389,6 +436,7 @@ only *requires* Redis to be reachable for that one file; the rest run fine witho
 | `/oauth/robinhood/callback` | GET | Robinhood's OAuth redirect target — not visited directly |
 | `/oauth/robinhood/status` | GET | Progress/result of the most recent authorization attempt |
 | `/market-data/{ticker}` | GET | Read-only robin_stocks connectivity check — live quote + latest 5-min bar |
+| `/market-data/schwab/{ticker}` | GET | Read-only Schwab connectivity check (Phase 4) — same shape as above, but always hits Schwab directly, bypassing the primary/fallback logic |
 | `/broker/positions/{ticker}` | GET | Read-only Robinhood MCP connectivity check — always hits the real MCP regardless of `MODE` |
 
 ## Troubleshooting
@@ -417,6 +465,12 @@ only *requires* Redis to be reachable for that one file; the rest run fine witho
 - **Ollama Cloud returns 401/403** — `OLLAMA_API_KEY` is missing, expired, or wrong; regenerate one at
   [ollama.com](https://ollama.com) (Settings → API keys). A response that comes back but fails to parse
   as a `TradeDecision` is a different problem — check the logged raw response — not an auth issue.
+- **`GET /market-data/schwab/{ticker}` returns null quote/bars** — this endpoint never raises (Schwab
+  failures degrade to null fields, not a 502) — check the app logs for the underlying
+  `market_data.schwab_client` warning. Usually either `SCHWAB_CLIENT_ID`/`SCHWAB_CLIENT_SECRET` are unset,
+  or the token at `SCHWAB_TOKEN_PATH` is missing/stale — re-run
+  `uv run scripts/bootstrap_schwab_oauth.py`. This is informational, not an outage: the trading pipeline
+  itself (`market_data_client.py`) falls back to Robinhood automatically whenever Schwab is unavailable.
 - **Migrations fail against Supabase** — use the Session Pooler connection string (port `5432`, or the
   pooled `6543` variant per Supabase's docs), not a direct connection that may not be reachable from
   wherever you're running `alembic`.

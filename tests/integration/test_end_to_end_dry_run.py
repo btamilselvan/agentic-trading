@@ -62,6 +62,24 @@ async def _ticker_state_cleanup():
     await store.clear(TICKER, TRADE_DATE)
 
 
+@pytest.fixture(autouse=True)
+def _no_schwab(monkeypatch):
+    """scheduler.py calls market_data.market_data_client (Schwab-primary, Robinhood-
+    fallback) instead of robinhood_client directly (Phase 4). This suite's real
+    market-data stubbing below (scheduler.rh.get_quote/get_5min_historicals) only
+    takes effect once market_data_client falls back to that same robinhood_client
+    module object -- force Schwab to report unavailable deterministically rather
+    than relying on SCHWAB_CLIENT_ID/SECRET happening to be unset wherever this
+    suite runs.
+    """
+    monkeypatch.setattr(scheduler.mdc.schwab_client, "get_quote", lambda ticker: None)
+    monkeypatch.setattr(
+        scheduler.mdc.schwab_client,
+        "get_5min_historicals",
+        lambda ticker, start_datetime, end_datetime: [],
+    )
+
+
 def _run_uvicorn(app: FastAPI, port: int) -> None:
     uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning")
 

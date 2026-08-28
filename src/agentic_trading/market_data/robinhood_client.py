@@ -16,13 +16,24 @@ treatment as the missing VIX feed in bucket_builder.build_market_context).
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import robin_stocks.robinhood as rh
 
 from agentic_trading.config import get_settings
+from agentic_trading.market_data.models import HistoricalBar, NewsItem, Quote
+
+__all__ = [
+    "HistoricalBar",
+    "NewsItem",
+    "Quote",
+    "ensure_login",
+    "get_5min_historicals",
+    "get_float_shares",
+    "get_latest_news",
+    "get_quote",
+]
 
 _logged_in = False
 
@@ -85,36 +96,6 @@ def ensure_login() -> None:
         return
     _logged_in = True
     _login_retry_after = None
-
-
-@dataclass(frozen=True)
-class HistoricalBar:
-    symbol: str
-    begins_at: datetime
-    open: float
-    high: float
-    low: float
-    close: float
-    volume: int
-
-
-@dataclass(frozen=True)
-class Quote:
-    symbol: str
-    bid_price: float | None
-    ask_price: float | None
-    bid_size: int | None
-    ask_size: int | None
-    last_trade_price: float | None
-    updated_at: datetime | None
-
-
-@dataclass(frozen=True)
-class NewsItem:
-    title: str
-    summary: str | None
-    published_at: datetime | None
-    source: str | None
 
 
 def _parse_timestamp(value: str) -> datetime:

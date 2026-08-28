@@ -3,8 +3,9 @@ section 5) for inspecting recent decisions/trades without a DB client, a manual
 kill-switch (spec section 4's circuit breaker is otherwise fully automatic --
 new BUYs already self-block once the daily drawdown cap trips, see
 execution/guardrails.py -- this is the operator's manual override on top of that),
-and two read-only connectivity checks (market-data via robin_stocks, broker state
-via the Robinhood MCP) -- neither places or touches any order.
+and three read-only connectivity checks (market-data via robin_stocks, market-data
+via Schwab, broker state via the Robinhood MCP) -- none of them place or touch any
+order.
 """
 
 from __future__ import annotations
@@ -24,7 +25,9 @@ from agentic_trading.config import TradingMode, get_settings
 from agentic_trading.execution import order_manager as om
 from agentic_trading.execution.broker_mcp_client import McpBrokerClient
 from agentic_trading.llm.schema import TradeDecision
+from agentic_trading.market_data import market_data_client as mdc
 from agentic_trading.market_data import robinhood_client as rh_market
+from agentic_trading.market_data import schwab_client
 from agentic_trading.scheduler import run_poll_cycle
 from agentic_trading.state import repository as repo
 from agentic_trading.state.db import get_session, session_scope
@@ -119,6 +122,36 @@ async def market_data(ticker: str) -> dict:
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"robin_stocks call failed: {exc}") from exc
 
+    return {
+        "ticker": ticker,
+        "quote": asdict(quote) if quote else None,
+        "latest_bar": asdict(bars[-1]) if bars else None,
+        "bars_today": len(bars),
+    }
+
+
+@router.get("/market-data/schwab/{ticker}")
+async def market_data_schwab(ticker: str) -> dict:
+    """Read-only smoke test for the Schwab Market Data API integration (Phase 4) --
+    fetches a live quote and today's 5-minute bars for `ticker` directly from Schwab,
+    bypassing the market_data_client fallback entirely so this endpoint tells you
+    specifically whether Schwab itself is reachable and authorized, independent of
+    whichever provider the trading pipeline actually ends up using this cycle.
+
+    Unlike /market-data/{ticker}, this never raises on failure -- schwab_client
+    already fails closed (returns None/[] rather than raising, so the fallback
+    orchestrator can react to it), so a missing/expired token or a down Schwab API
+    surfaces here as null fields, not a 502.
+    """
+    ticker = ticker.upper()
+    quote = await asyncio.to_thread(schwab_client.get_quote, ticker)
+    now = datetime.now(UTC)
+    bars = await asyncio.to_thread(
+        schwab_client.get_5min_historicals,
+        ticker,
+        mdc.market_open_today(now),
+        now,
+    )
     return {
         "ticker": ticker,
         "quote": asdict(quote) if quote else None,

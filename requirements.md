@@ -3,7 +3,8 @@
 ## Change Log & Revision History
 > **Instructions for Claude Code:** Always inspect this log first to see what was modified recently.
 
-* **v1.2.0 (2026-08-24):** Added Phase 3 requirements (Completed).
+* **v1.4.0 (2026-08-28):** Added Phase 4 requirements (Completed).
+* **v1.3.0 (2026-08-24):** Added Phase 3 requirements (Completed).
 * **v1.1.0 (2026-08-19):** Added Phase 2 requirements (Completed).
 * **v1.0.0 (2026-08-15):** Initial Phase 1 release (Completed).
 
@@ -99,7 +100,7 @@ An autonomous, lightweight intraday trading service built in Python (FastAPI) th
 ### 7. Problem Statement & Objective
 In Phase 1 and 2, evaluating isolated 5-minute market metrics caused decision oscillation (e.g., flipping between `BUY` and `HOLD` across consecutive bars due to minor price noise). Phase 3 introduces stateful context persistence to ensure decisions maintain continuity, respect an active thesis, and enforce strict invalidation thresholds.
 
-### 8 Functional Requirements
+### 8. Functional Requirements
 
 * **State Persistence & Storage:**
   * Implement a lightweight local state store (Redis) to track active evaluation state per ticker across background scanning cycles.
@@ -127,6 +128,67 @@ In Phase 1 and 2, evaluating isolated 5-minute market metrics caused decision os
 * Invalidation criteria 1 (stop-loss) and 2 (momentum break) are code-enforced (`execution/invalidation.py`'s `evaluate_exit_guardrails`), checked *before* any LLM call each cycle and able to force an exit even against an LLM `HOLD` -- consistent with this codebase's existing guardrail philosophy that safety-critical checks are never merely advisory. Criterion 3 (a negative catalyst headline) has no code-side check, since there is no sentiment classifier available (see `market_data/robinhood_client.py`'s news integration) -- it is judged entirely by the LLM via `thesis_continuity_flag`/`SELL`.
 * The spec's `SELL`/`FLAT`/`EXIT` state-downgrade language is implemented as: `TradeDecision.decision` gains a third value, `SELL` -- meaningful only when a position is already `IN_POSITION` -- and a downgrade is any of (a) `evaluate_exit_guardrails` forcing an exit, or (b) the LLM responding `SELL` or `thesis_continuity_flag=false`. Either path calls `execution/order_manager.py`'s `try_exit_position_early` (cancels the resting target-sell order, places an immediate marketable exit) with the triggering reason recorded on `Trade.exit_reason`.
 * The one-way trailing-stop ratchet (`execution/invalidation.py`'s `compute_trailing_stop`, applied via `execution/order_manager.py`'s `apply_trailing_stop`) is on by default (`TRAILING_STOP_ENABLED=true`) but operator-configurable off, in which case a position's stop/target stay exactly as set at entry for its whole lifetime -- the deterministic stop-loss/momentum invalidation check above still runs regardless of this flag either way.
+
+---
+
+## Phase 4: Stock quotes using Schwab Market Data Production API (Completed)
+### 9. Problem Statement & Objective
+* The Robinhood API is unofficial and subject to rate limits, downtime, and potential future deprecation. To ensure continuity of market data feeds, the system will integrate Schwab's Market Data Production API for stock quotes.
+
+### 10. Functional Requirements
+* **Schwab API Integration:** Implement a Schwab client module to fetch real-time stock quotes and market data.
+* **Fallback Mechanism:** If the Schwab client module fails to fetch real-stime stock quotes, use Robinhood API.
+
+### Implementation Notes
+
+* Scope was widened slightly beyond the literal "stock quotes" wording, in consultation with the
+  operator: Schwab became the primary source for **both** quotes and 5-minute historicals, not quotes
+  only. Schwab's `pricehistory` endpoint natively supports 5-minute candles (`schwab-py`'s
+  `get_price_history_every_five_minutes`), the same granularity `robin_stocks.get_stock_historicals
+  (interval="5minute")` already provided, so no separate 1-minute-poll-and-aggregate scheme was needed.
+  News (`get_latest_news`) and float shares (`get_float_shares`) stay Robinhood-only -- Schwab's Market
+  Data API has no confirmed equivalent for either.
+* `market_data/schwab_client.py` is the only module that imports `schwab-py`, mirroring
+  `market_data/robinhood_client.py`'s isolation of robin_stocks -- same pattern
+  `execution/broker_mcp_client.py`'s module docstring calls out for brokerage integrations generally.
+  `market_data/market_data_client.py` is the new orchestrator: tries Schwab first, falls back to
+  Robinhood on any empty/failed result. Both provider modules fail closed (log a warning, return
+  `None`/`[]`) rather than raise, so the fallback layer never needs exception handling of its own --
+  `scheduler.py` and `api/routes.py` call `market_data_client` instead of either provider module
+  directly (except for the two Robinhood-only calls above, and the dedicated
+  `GET /market-data/schwab/{ticker}` connectivity check, which bypasses the fallback on purpose to test
+  Schwab specifically).
+* `HistoricalBar`/`Quote`/`NewsItem` moved out of `robinhood_client.py` into a new
+  `market_data/models.py`, so `schwab_client.py` doesn't need to import `robinhood_client.py` (or
+  duplicate the dataclasses) to produce the same shapes; `robinhood_client.py` re-exports them for
+  backward compatibility.
+* Auth: Schwab's OAuth needs a real, refreshable session for every call (unlike robin_stocks, whose
+  market-data calls work unauthenticated) -- `scripts/bootstrap_schwab_oauth.py` is the one-time
+  (practically: roughly weekly, see below) interactive step using `schwab-py`'s `easy_client`, which
+  handles the whole browser-consent + local-callback-server + token-write dance internally, unlike the
+  Robinhood MCP flow's hand-rolled callback server (`scripts/bootstrap_mcp_oauth.py`). The running app
+  never performs this interactive step itself -- `schwab_client.py` only ever reads the cached token via
+  `client_from_token_file` and lets `schwab-py` refresh it silently in the background. Chose the
+  single-script pattern over also adding in-app `GET /oauth/schwab/{authorize,callback,status}` endpoints
+  (as Robinhood's MCP flow has, for completing auth on a headless deployed instance) -- not worth the
+  extra surface area unless/until there's a concrete headless-deploy need, per operator decision.
+* Schwab refresh tokens go stale after roughly a week of disuse (`schwab-py`'s `easy_client` proactively
+  discards anything older than `max_token_age`, ~6.5 days) -- this is a soft dependency, not a hard one:
+  a stale/missing/unconfigured token just means `market_data_client.py` falls back to Robinhood for every
+  call until the bootstrap script is re-run, never an outage.
+* `scripts/refresh_schwab_token.py` (added after initial Phase 4 delivery, per operator request) forces
+  an access-token refresh via the stored refresh token, no browser needed -- unlike
+  `bootstrap_schwab_oauth.py`, it's meant for unattended/cron use (e.g. daily) so the on-disk token never
+  goes long-idle. It calls `client.session.refresh_token()` directly (the same authlib `OAuth2Client`
+  underneath `client_from_token_file`, whose `update_token` callback already persists to
+  `SCHWAB_TOKEN_PATH` on every refresh -- both the transparent per-call refresh `schwab_client.py` relies
+  on and this script's explicit one go through the identical write path). It does NOT reset the refresh
+  token's own ~7-day absolute expiry -- Schwab's is a fixed lifetime from issuance, not sliding-on-use --
+  so it fails clearly (rather than leaving a stale token in place) once that's elapsed, pointing back at
+  `bootstrap_schwab_oauth.py` for the interactive re-auth that actually is needed at that point.
+* The Schwab token path moved under `.secrets/` (`SCHWAB_TOKEN_PATH=.secrets/schwab_token.json`,
+  consistent with `ROBINHOOD_TOKEN_PATH`/`MCP_TOKEN_STORE_PATH`) rather than the repo root the original
+  spike (`scripts/schwab_auth_demo.py`, not merged) used -- `.secrets/` is already gitignored.
 
 ---
 

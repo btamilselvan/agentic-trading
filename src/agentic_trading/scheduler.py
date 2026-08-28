@@ -29,6 +29,7 @@ from agentic_trading.execution.guardrails import check_daily_trade_cap, check_po
 from agentic_trading.execution.invalidation import compute_trailing_stop, evaluate_exit_guardrails
 from agentic_trading.llm.base import LLMClient
 from agentic_trading.llm.schema import TickerState, TradeDecision
+from agentic_trading.market_data import market_data_client as mdc
 from agentic_trading.market_data import robinhood_client as rh
 from agentic_trading.market_data.bucket_builder import (
     MarketContext,
@@ -60,7 +61,7 @@ _rvol_lookback_cache: dict[str, list] = {}
 async def _get_lookback_bars(ticker: str) -> list:
     if ticker not in _rvol_lookback_cache:
         _rvol_lookback_cache[ticker] = await asyncio.to_thread(
-            rh.get_5min_historicals, ticker, span="week"
+            mdc.get_5min_historicals, ticker, span="week"
         )
     return _rvol_lookback_cache[ticker]
 
@@ -108,7 +109,7 @@ async def _get_market_context(settings: Settings) -> MarketContext | None:
     if not benchmark:
         return None
     try:
-        bars_today = await asyncio.to_thread(rh.get_5min_historicals, benchmark, span="day")
+        bars_today = await asyncio.to_thread(mdc.get_5min_historicals, benchmark, span="day")
         lookback = await _get_lookback_bars(benchmark)
     except Exception:
         logger.exception(
@@ -444,19 +445,20 @@ async def _poll_ticker(
     ticker_state_store: TickerStateStore,
     market_context: MarketContext | None = None,
 ) -> None:
-    # robin_stocks is synchronous -- run it in a worker thread rather than block the
-    # event loop this scheduler (and the whole FastAPI app) shares. Left unwrapped,
-    # a slow call (or an interactive MFA prompt on first login) freezes everything,
-    # including subsequent scheduled poll cycles.
+    # Both market_data_client's Schwab-primary path and its robin_stocks fallback are
+    # synchronous -- run them in a worker thread rather than block the event loop this
+    # scheduler (and the whole FastAPI app) shares. Left unwrapped, a slow call (or an
+    # interactive MFA prompt on first robin_stocks login) freezes everything, including
+    # subsequent scheduled poll cycles.
 
     # get 5 mins bars for today (begin time, open/close price, high/low and volume)
-    bars = await asyncio.to_thread(rh.get_5min_historicals, ticker, span="day")
+    bars = await asyncio.to_thread(mdc.get_5min_historicals, ticker, span="day")
     if not bars:
         return
     latest_bar = bars[-1]
 
     #get current quote (bid/ask price + size)
-    quote = await asyncio.to_thread(rh.get_quote, ticker)
+    quote = await asyncio.to_thread(mdc.get_quote, ticker)
 
     #get the bars for the last one week
     lookback = await _get_lookback_bars(ticker)
@@ -762,7 +764,7 @@ async def run_eod_liquidation(
     liquidation_prices: dict[str, float] = {}
     async with session_scope() as session:
         for trade in await repo.get_open_trades(session):
-            quote = await asyncio.to_thread(rh.get_quote, trade.ticker)
+            quote = await asyncio.to_thread(mdc.get_quote, trade.ticker)
             if quote and quote.bid_price is not None:
                 liquidation_prices[trade.ticker] = quote.bid_price
         await om.liquidate_all_open_positions(
