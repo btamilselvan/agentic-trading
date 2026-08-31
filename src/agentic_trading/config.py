@@ -33,6 +33,7 @@ class LlmProvider(enum.StrEnum):
     OLLAMA = "ollama"
     OPENAI = "openai"
     CLAUDE = "claude"
+    GEMINI = "gemini"
 
 
 class Settings(BaseSettings):
@@ -66,6 +67,11 @@ class Settings(BaseSettings):
     # 0.0 for deterministic, repeatable trade decisions -- this is a trading agent, not a
     # creative one, so we don't want sampling variance changing BUY/HOLD calls run to run.
     llm_temperature: float = 0.0
+    # Google AI Studio (Gemini) API key -- only read when llm_provider=gemini. Free-tier keys
+    # work unchanged; api_base is exposed separately (rather than hardcoded in gemini_client.py)
+    # so tests can point it at a local mock server instead of touching the real endpoint.
+    gemini_api_key: str | None = None
+    gemini_api_base: str = "https://generativelanguage.googleapis.com"
 
     # --- Robinhood market data (robin_stocks) ---------------------------
     robinhood_username: str | None = None

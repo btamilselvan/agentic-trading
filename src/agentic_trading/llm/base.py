@@ -1,6 +1,7 @@
 """LLMClient interface -- the only thing the rest of the app depends on for the
-decision engine. Swap the provider (Ollama, OpenAI, Claude, ...) by implementing
-this Protocol and registering it in `get_llm_client`; no other module needs to change.
+decision engine. Swap the provider (Ollama, Gemini, OpenAI, Claude, ...) by
+implementing this Protocol and registering it in `get_llm_client`; no other module
+needs to change.
 """
 
 from __future__ import annotations
@@ -35,6 +36,10 @@ def get_llm_client() -> LLMClient:
         from agentic_trading.llm.ollama_client import OllamaClient
 
         return OllamaClient()
+    if settings.llm_provider == LlmProvider.GEMINI:
+        from agentic_trading.llm.gemini_client import GeminiClient
+
+        return GeminiClient()
     raise NotImplementedError(
         f"LLM provider {settings.llm_provider!r} has no LLMClient implementation yet. "
         "Add one under agentic_trading/llm/ and register it here."

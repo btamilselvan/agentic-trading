@@ -144,6 +144,23 @@ Docker Compose forces `OLLAMA_HOST` to its own local `ollama` container regardle
 [Run with Docker Compose](#run-with-docker-compose)) — to use Ollama Cloud under Compose, remove that
 override from `docker-compose.yml` and keep `OLLAMA_API_KEY` set in `.env`.
 
+### Using Gemini instead of Ollama
+
+`LLM_PROVIDER=gemini` (`llm/gemini_client.py`) talks to Google's Gemini API — including the free tier of
+[Google AI Studio](https://aistudio.google.com/apikey) — over plain REST, no extra SDK. Set:
+
+```bash
+LLM_PROVIDER=gemini
+LLM_MODEL=gemini-3.6-flash   # or whichever exact model id your API key has access to
+GEMINI_API_KEY=<your Google AI Studio API key>
+```
+
+No Ollama process needed in this mode — skip step 2 of [Run locally](#run-locally-no-docker) entirely.
+Like Ollama, this uses the model's native structured-output support to get back a schema-constrained
+`TradeDecision`, so no prompt changes are needed; `_to_gemini_schema` in `gemini_client.py` translates
+`TradeDecision`'s pydantic schema into the JSON Schema subset Gemini's `responseSchema` accepts. See
+[Switching LLM providers](#switching-llm-providers) for the general pattern this follows.
+
 ## Schwab market data (primary source)
 
 Phase 4: [Schwab's Market Data Production API](https://developer.schwab.com) (via `schwab-py`) is the
@@ -386,9 +403,11 @@ Before flipping `MODE=LIVE` in `.env`:
 
 The default is Ollama (`LLM_PROVIDER=ollama`), which itself supports both a local daemon and Ollama
 Cloud — see [LLM backend: local vs. Ollama Cloud](#llm-backend-local-vs-ollama-cloud) if that's all you
-need; it's a `.env` change, not a code change. To use an entirely different provider (OpenAI, Claude,
-etc.), implement the `LLMClient` protocol in `llm/base.py` (see `llm/ollama_client.py` for the shape) and
-add one branch to `get_llm_client()` in the same file — no other module needs to change.
+need; it's a `.env` change, not a code change. `LLM_PROVIDER=gemini` is also implemented — see
+[Using Gemini instead of Ollama](#using-gemini-instead-of-ollama) — likewise just a `.env` change. To add
+an entirely new provider (OpenAI, Claude, etc.), implement the `LLMClient` protocol in `llm/base.py` (see
+`llm/ollama_client.py` or `llm/gemini_client.py` for the shape) and add one branch to `get_llm_client()`
+in the same file — no other module needs to change.
 
 ## Running tests
 

@@ -21,31 +21,18 @@ from collections.abc import Sequence
 import httpx
 
 from agentic_trading.config import get_settings
+from agentic_trading.llm.errors import LLMDecisionError, strip_markdown_fence
 from agentic_trading.llm.prompt import build_prompt
 from agentic_trading.llm.schema import TickerState, TradeDecision
 from agentic_trading.market_data.bucket_builder import BucketLike
 
 logger = logging.getLogger(__name__)
 
-
-class LLMDecisionError(Exception):
-    """Raised when no valid TradeDecision could be obtained after all retries."""
-
-
-def _strip_markdown_fence(text: str) -> str:
-    """Some models (observed: gemma4:31b on Ollama Cloud) wrap structured-output JSON
-    in a ```json ... ``` fence despite the `format` constraint, even though the same
-    request against a local Ollama daemon returns bare JSON. Strip one if present;
-    a no-op on already-bare JSON."""
-    stripped = text.strip()
-    if not stripped.startswith("```"):
-        return stripped
-    first_newline = stripped.find("\n")
-    stripped = stripped[first_newline + 1 :] if first_newline != -1 else stripped[3:]
-    if stripped.endswith("```"):
-        stripped = stripped[:-3]
-    return stripped.strip()
-
+# Re-exported for backwards compatibility -- LLMDecisionError/strip_markdown_fence now
+# live in llm/errors.py so other providers (e.g. gemini_client.py) can share them
+# instead of each defining their own copy. _strip_markdown_fence kept as a private
+# alias since it's referenced below and by existing tests importing this module.
+_strip_markdown_fence = strip_markdown_fence
 
 _UNSET: str | None = "__unset__"  # sentinel distinct from None, which is a valid api_key override
 
