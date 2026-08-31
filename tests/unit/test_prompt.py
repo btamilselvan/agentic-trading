@@ -62,6 +62,55 @@ def test_prompt_includes_book_depth_fields():
     assert "book_imbalance" in prompt.split("Input:\n", 1)[0]  # mentioned in instructions
 
 
+def test_prompt_includes_buy_pressure_pct():
+    # buy_pressure_pct replaces the raw est_buy_volume/est_sell_volume pair with a
+    # single normalized ratio (same [-1, 1]-style shape as book_imbalance) so the
+    # LLM doesn't have to divide two raw volume counts itself.
+    t0 = datetime(2026, 8, 17, 9, 30, tzinfo=UTC)
+    # Closes at the high -- all estimated buy volume, so buy_pressure_pct == 100.
+    bucket = build_bucket(
+        HistoricalBar("AAPL", t0, 100, 101, 99, 101, 1_000), quote=None, lookback_bars=[]
+    )
+    state = TickerState(completed_trades_today=0, open_positions=0, realized_pnl_today=0.0)
+
+    prompt = build_prompt("AAPL", [bucket], state)
+
+    payload = json.loads(prompt.split("Input:\n", 1)[1])
+    bucket_payload = payload["buckets"][0]
+    assert bucket_payload["buy_pressure_pct"] == 100.0
+    assert "est_buy_volume" not in bucket_payload
+    assert "est_sell_volume" not in bucket_payload
+    assert "buy_pressure_pct" in prompt.split("Input:\n", 1)[0]  # mentioned in instructions
+
+
+def test_prompt_raw_quote_fields_only_on_latest_bucket():
+    # bid_price/ask_price/bid_size/ask_size are redundant history once spread/
+    # book_imbalance are present on every bucket -- only the most recent bucket
+    # carries them, since that's what buy_limit_price/target_sell_price/
+    # stop_loss_price get priced against.
+    t0 = datetime(2026, 8, 17, 9, 30, tzinfo=UTC)
+    t1 = t0.replace(minute=35)
+    quote = Quote(
+        symbol="AAPL", bid_price=99.9, ask_price=100.1, bid_size=750, ask_size=250,
+        last_trade_price=100.0, updated_at=None,
+    )
+    bucket0 = build_bucket(
+        HistoricalBar("AAPL", t0, 100, 101, 99, 100.5, 1000), quote=quote, lookback_bars=[]
+    )
+    bucket1 = build_bucket(
+        HistoricalBar("AAPL", t1, 100.5, 103, 100, 102.5, 1500), quote=quote, lookback_bars=[]
+    )
+    state = TickerState(completed_trades_today=0, open_positions=0, realized_pnl_today=0.0)
+
+    prompt = build_prompt("AAPL", [bucket0, bucket1], state)
+
+    payload = json.loads(prompt.split("Input:\n", 1)[1])
+    first, second = payload["buckets"]
+    for field in ("bid_price", "ask_price", "bid_size", "ask_size"):
+        assert field not in first
+        assert field in second
+
+
 def test_prompt_includes_gap_context_from_prior_close():
     # Regression test for gap 2: with only today's own bars in view, the LLM can't
     # tell if today opened with a gap -- prior_close/today_open/gap_pct fix that.
@@ -249,8 +298,11 @@ def test_prompt_serializes_when_lookback_buckets_carry_decimal_fields():
 
 
 def test_prompt_includes_session_time_context():
-    # Regression test for gap 6: minutes_since_open/session_phase weren't computed
-    # at all before -- the LLM had no sense of where in the day a bucket fell.
+    # Regression test for gap 6: session_phase wasn't computed at all before -- the
+    # LLM had no sense of where in the day a bucket fell. minutes_since_open is
+    # computed internally to derive session_phase but deliberately not sent in the
+    # payload -- it's redundant with the categorical label the LLM is told how to
+    # use (see _bucket_to_dict).
     t0 = datetime(2026, 8, 17, 9, 30, tzinfo=UTC)
     t1 = t0.replace(minute=35)
     t2 = t0.replace(hour=11, minute=45)  # 135 minutes after session start
@@ -266,11 +318,9 @@ def test_prompt_includes_session_time_context():
 
     payload = json.loads(prompt.split("Input:\n", 1)[1])
     first, second, third = payload["buckets"]
-    assert first["minutes_since_open"] == 0
+    assert "minutes_since_open" not in first
     assert first["session_phase"] == "OPENING_VOLATILITY"
-    assert second["minutes_since_open"] == 5
     assert second["session_phase"] == "OPENING_VOLATILITY"
-    assert third["minutes_since_open"] == 135
     assert third["session_phase"] == "MIDDAY_CHOP"
     assert "session_phase" in prompt.split("Input:\n", 1)[0]  # mentioned in instructions
 

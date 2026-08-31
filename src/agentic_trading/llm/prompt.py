@@ -38,14 +38,25 @@ breakout, volume absorption, quick mean reversion, momentum continuation). Do no
 consider multi-day or swing setups -- any position must be closeable within the same \
 session. Each bucket's book_imbalance is the top-of-book depth skew in [-1, 1]: \
 positive means more resting size on the bid (buying pressure), negative means more \
-on the ask (selling pressure). ticker_state_today.gap_pct is today's open versus the \
-prior session's close (positive = gapped up, negative = gapped down, null = no prior \
-close available yet) -- a large gap is a precondition for a genuine "morning \
-breakout" setup, as opposed to ordinary intraday drift. Each bucket's \
-vwap_deviation_pct is that bucket's close versus the session VWAP so far: \
-sustained positive readings with rising volume support momentum continuation or a \
-breakout holding; a move back toward/through zero suggests the move is fading or \
-being rejected. If present, market_context describes the broad market today via a \
+on the ask (selling pressure). Each bucket's buy_pressure_pct estimates buying vs. \
+selling pressure within that bar, in [-100, 100] (positive = more estimated buy \
+volume, negative = more estimated sell volume) -- derived from where the bar closed \
+within its high/low range times volume, NOT a real trade-by-trade classification, so \
+treat it as a soft proxy rather than a precise read. Only the most recent bucket \
+(not earlier ones) also carries raw bid_price/ask_price/bid_size/ask_size -- the \
+live top-of-book quote, useful when pricing buy_limit_price/target_sell_price/ \
+stop_loss_price; earlier buckets omit these since spread/book_imbalance already \
+summarize the relationship between them. ticker_state_today.gap_pct is today's open \
+versus the prior session's close (positive = gapped up, negative = gapped down, \
+null = no prior close available yet) -- a large gap is a precondition for a genuine \
+"morning breakout" setup, as opposed to ordinary intraday drift. Each bucket's vwap \
+is the session-cumulative volume-weighted average price through that bucket -- the \
+standard intraday momentum reference line, and a useful anchor price when setting \
+target_sell_price/stop_loss_price levels above/below it. Each bucket's \
+vwap_deviation_pct is that bucket's close versus its vwap: sustained positive \
+readings with rising volume support momentum continuation or a breakout holding; a \
+move back toward/through zero suggests the move is fading or being rejected. If \
+present, market_context describes the broad market today via a \
 benchmark index ETF (change_pct and vwap_deviation_pct mean the same thing as \
 above, but for the whole market; range_pct is today's high-low range as a % of \
 open, a volatility proxy). Weigh the ticker's own setup against this: a breakout \
@@ -60,7 +71,7 @@ keeps climbing is a warning sign of exhaustion. vwap_cross is "up" on the bucket
 where price reclaims its session VWAP from below, "down" where it breaks below \
 from above, and null otherwise -- a reclaim aligned with volume is a stronger \
 breakout signal than price merely drifting above VWAP without ever having crossed \
-it intraday. Each bucket's minutes_since_open and session_phase place it within \
+it intraday. Each bucket's session_phase places it within \
 the trading day: "OPENING_VOLATILITY" (first 30 minutes) breakouts are common but \
 noisier and more prone to failing, "MORNING_TREND" (30-120 minutes) is where trend \
 continuation setups are most reliable, and "MIDDAY_CHOP" (120+ minutes) favors \
@@ -147,8 +158,21 @@ already has an open position or has hit its trade cap for the day, respond HOLD.
 """
 
 
+def _buy_pressure_pct(est_buy_volume: int, est_sell_volume: int, volume: int) -> float | None:
+    """(est_buy_volume - est_sell_volume) / volume, rescaled to [-100, 100] -- same
+    normalized-ratio shape as book_imbalance, so the LLM reads a single signed signal
+    instead of having to divide two raw six-figure volume counts itself (unreliable
+    arithmetic for a small local model). None if volume is zero (nothing to compute
+    a ratio from), matching pct_change's zero-reference guard elsewhere in this
+    module.
+    """
+    if not volume:
+        return None
+    return (est_buy_volume - est_sell_volume) / volume * 100
+
+
 def _bucket_to_dict(
-    bucket: BucketLike, previous: BucketLike | None, session_start: datetime
+    bucket: BucketLike, previous: BucketLike | None, session_start: datetime, is_latest: bool
 ) -> dict:
     close = _num(bucket.close)
     vwap = _num(bucket.vwap)
@@ -157,43 +181,60 @@ def _bucket_to_dict(
     rsi = _num(bucket.rsi)
     prev_rsi = _num(previous.rsi) if previous else None
     minutes_open = minutes_since_open(bucket.bucket_start, session_start)
-    return {
+    payload = {
         "bucket_start": bucket.bucket_start.isoformat(),
         "open": _num(bucket.open),
         "high": _num(bucket.high),
         "low": _num(bucket.low),
         "close": close,
         "volume": bucket.volume,
-        "est_buy_volume": bucket.est_buy_volume,
-        "est_sell_volume": bucket.est_sell_volume,
-        "bid_price": _num(bucket.bid_price),
-        "ask_price": _num(bucket.ask_price),
-        "bid_size": bucket.bid_size,
-        "ask_size": bucket.ask_size,
-        "spread": _num(bucket.spread),
-        "book_imbalance": _num(bucket.book_imbalance),
-        "candle_body": _num(bucket.candle_body),
-        "upper_wick": _num(bucket.upper_wick),
-        "lower_wick": _num(bucket.lower_wick),
-        "rvol": _num(bucket.rvol),
-        "vwap": vwap,
-        "vwap_deviation_pct": pct_change(close, vwap),
-        # Sequential signals -- vs. the immediately preceding bucket, not raw levels
-        # -- so a small local model isn't left to infer momentum/volume trend or a
-        # VWAP crossing itself by diffing raw numbers across the bucket array.
-        "close_change_pct": pct_change(close, prev_close),
-        "volume_change_pct": pct_change(bucket.volume, previous.volume if previous else None),
-        "vwap_cross": detect_vwap_cross(prev_close, prev_vwap, close, vwap),
-        # Session time context (requirements.md section 6) -- where this bucket
-        # falls within the trading day, so the LLM weighs a setup differently at
-        # 09:35 than at 11:15. See bucket_builder.session_phase for the boundaries.
-        "minutes_since_open": minutes_open,
-        "session_phase": session_phase(minutes_open),
-        # RSI (requirements.md section 6) -- Wilder-smoothed, plain Python (see
-        # bucket_builder.compute_rsi); null until enough bars have accumulated.
-        "rsi": rsi,
-        "rsi_centerline_cross": rsi_centerline_cross(prev_rsi, rsi),
+        "buy_pressure_pct": _buy_pressure_pct(
+            bucket.est_buy_volume, bucket.est_sell_volume, bucket.volume
+        ),
     }
+    if is_latest:
+        # Raw top-of-book quote -- only needed on the most recent bucket, to price
+        # buy_limit_price/target_sell_price/stop_loss_price near the live bid/ask.
+        # Every bucket (including earlier ones) already carries the normalized
+        # spread/book_imbalance derived from these, so carrying the raw quote across
+        # the whole history would just be redundant tokens.
+        payload["bid_price"] = _num(bucket.bid_price)
+        payload["ask_price"] = _num(bucket.ask_price)
+        payload["bid_size"] = bucket.bid_size
+        payload["ask_size"] = bucket.ask_size
+    payload.update(
+        {
+            "spread": _num(bucket.spread),
+            "book_imbalance": _num(bucket.book_imbalance),
+            "candle_body": _num(bucket.candle_body),
+            "upper_wick": _num(bucket.upper_wick),
+            "lower_wick": _num(bucket.lower_wick),
+            "rvol": _num(bucket.rvol),
+            "vwap": vwap,
+            "vwap_deviation_pct": pct_change(close, vwap),
+            # Sequential signals -- vs. the immediately preceding bucket, not raw
+            # levels -- so a small local model isn't left to infer momentum/volume
+            # trend or a VWAP crossing itself by diffing raw numbers across the
+            # bucket array.
+            "close_change_pct": pct_change(close, prev_close),
+            "volume_change_pct": pct_change(
+                bucket.volume, previous.volume if previous else None
+            ),
+            "vwap_cross": detect_vwap_cross(prev_close, prev_vwap, close, vwap),
+            # Session time context (requirements.md section 6) -- where this bucket
+            # falls within the trading day, so the LLM weighs a setup differently at
+            # 09:35 than at 11:15. See bucket_builder.session_phase for the
+            # boundaries. minutes_since_open itself isn't sent -- session_phase is
+            # the same information already bucketed into the categorical label the
+            # LLM is told how to use, so sending both is redundant.
+            "session_phase": session_phase(minutes_open),
+            # RSI (requirements.md section 6) -- Wilder-smoothed, plain Python (see
+            # bucket_builder.compute_rsi); null until enough bars have accumulated.
+            "rsi": rsi,
+            "rsi_centerline_cross": rsi_centerline_cross(prev_rsi, rsi),
+        }
+    )
+    return payload
 
 
 def build_prompt(
@@ -205,8 +246,11 @@ def build_prompt(
     previous: BucketLike | None = None
     if bucket_history:
         session_start = bucket_history[0].bucket_start
-        for bucket in bucket_history:
-            buckets_payload.append(_bucket_to_dict(bucket, previous, session_start))
+        last_index = len(bucket_history) - 1
+        for index, bucket in enumerate(bucket_history):
+            buckets_payload.append(
+                _bucket_to_dict(bucket, previous, session_start, index == last_index)
+            )
             previous = bucket
     payload = {
         "ticker": ticker,

@@ -3,6 +3,7 @@
 ## Change Log & Revision History
 > **Instructions for Claude Code:** Always inspect this log first to see what was modified recently.
 
+* **v1.5.0 (2026-08-28):** Added Phase 5 requirements (New).
 * **v1.4.0 (2026-08-28):** Added Phase 4 requirements (Completed).
 * **v1.3.0 (2026-08-24):** Added Phase 3 requirements (Completed).
 * **v1.1.0 (2026-08-19):** Added Phase 2 requirements (Completed).
@@ -93,6 +94,7 @@ An autonomous, lightweight intraday trading service built in Python (FastAPI) th
 * **Short interest % is NOT implemented** -- neither robin_stocks nor the Robinhood API expose it (no field, no endpoint), and unlike buy/sell volume or book depth there's no reasonable OHLCV-only proxy for it. Would need a third-party data provider to add later.
 * RSI is implemented in plain Python (Wilder's smoothing) rather than Pandas-TA, since nothing else in this project uses pandas and the algorithm doesn't justify a first-time dependency for one indicator.
 * Session Time Context boundaries (30 / 120 minutes) aren't specified above, so they default to the existing `MARKET_OPEN_TIME`/`EVALUATION_WINDOW_END_TIME` poll window (09:30-11:30) rather than being separately configurable.
+* **(2026-08-31) LLM payload trim:** `minutes_since_open` is still computed per bucket (needed to derive session classification) but is no longer sent to the LLM in `llm/prompt.py` -- it's redundant with the session_phase label the LLM is already told how to weigh, and dropping it (along with folding `est_buy_volume`/`est_sell_volume` into a single normalized `buy_pressure_pct`, and sending raw bid/ask quote fields only on the most recent bucket) reduces prompt size/noise for the small local model without losing information. `est_buy_volume`/`est_sell_volume` and the full per-bucket bid/ask are still computed and persisted to Postgres (`state/models.py`'s `Bucket`) for audit/backtesting -- only the LLM-facing payload is trimmed.
 
 
 ## Phase 3: Stateful Decision Engine & Memory Persistence (Completed)
@@ -189,6 +191,18 @@ In Phase 1 and 2, evaluating isolated 5-minute market metrics caused decision os
 * The Schwab token path moved under `.secrets/` (`SCHWAB_TOKEN_PATH=.secrets/schwab_token.json`,
   consistent with `ROBINHOOD_TOKEN_PATH`/`MCP_TOKEN_STORE_PATH`) rather than the repo root the original
   spike (`scripts/schwab_auth_demo.py`, not merged) used -- `.secrets/` is already gitignored.
+
+---
+
+## Phase 5: Stock screener (New)
+### 11. Problem Statement & Objective
+* To enhance the system's ability to identify potential intraday trading opportunities, a stock screener will be implemented to filter stocks based on specific criteria such as price, volume, volatility, and other technical indicators.
+### 12. Functional Requirements
+* **Screener Criteria:** The screener should allow filtering based on:
+  * Price range (e.g., $10 - $100)
+  * Average daily volume (e.g., > 1M shares)
+  * Volatility (e.g., ATR or standard deviation)
+  * Technical indicators (e.g., RSI, MACD, moving averages)
 
 ---
 
