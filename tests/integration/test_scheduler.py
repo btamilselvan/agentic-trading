@@ -121,9 +121,35 @@ def _patch_catalyst_context(monkeypatch):
     scheduler._float_shares_cache.clear()
 
 
+def _with_forming_tail(bar: HistoricalBar) -> list[HistoricalBar]:
+    """`bar` plus a synthetic still-forming tail bar 5 minutes later.
+
+    scheduler._poll_ticker (and _get_market_context) now treat the LAST bar of a
+    "day"-span fetch as the live candle for the window that just started this
+    instant and drop it -- only bars[:-1] are closed/final (see scheduler.py's
+    comment on this). So any fixture that wants `bar` to actually be recorded/
+    evaluated this cycle needs a tail bar after it, or `bar` itself would be
+    mistaken for the still-forming one and discarded. The tail's own OHLCV is
+    irrelevant -- it's never read by the code under test, just dropped as "not
+    closed yet".
+    """
+    tail = HistoricalBar(
+        bar.symbol,
+        bar.begins_at + timedelta(minutes=5),
+        bar.close,
+        bar.close,
+        bar.close,
+        bar.close,
+        0,
+    )
+    return [bar, tail]
+
+
 def _patch_market_data(monkeypatch, bar: HistoricalBar, quote: Quote | None = None):
     monkeypatch.setattr(
-        scheduler.rh, "get_5min_historicals", lambda ticker, span="day", bounds="regular": [bar]
+        scheduler.rh,
+        "get_5min_historicals",
+        lambda ticker, span="day", bounds="regular": _with_forming_tail(bar),
     )
     monkeypatch.setattr(scheduler.rh, "get_quote", lambda ticker: quote)
     scheduler._rvol_lookback_cache.clear()
@@ -208,7 +234,7 @@ async def test_poll_cycle_refreshes_volume_of_already_recorded_bucket(db_session
     should correct the already-saved row in place rather than being silently
     discarded by the "already polled this bucket" dedup check.
     """
-    bars = [HistoricalBar("AAPL", BUCKET_START, 100, 101, 99, 100.5, 1000)]
+    bars = _with_forming_tail(HistoricalBar("AAPL", BUCKET_START, 100, 101, 99, 100.5, 1000))
 
     def fake_get_5min_historicals(ticker, span="day", bounds="regular"):
         return bars
@@ -224,9 +250,9 @@ async def test_poll_cycle_refreshes_volume_of_already_recorded_bucket(db_session
 
     await scheduler.run_poll_cycle(broker=broker, llm_client=llm, settings=settings, now=MID_WINDOW)
 
-    # Same bucket_start, but Schwab now reports the fully-settled volume for that
-    # exact same 5-minute window.
-    bars = [HistoricalBar("AAPL", BUCKET_START, 100, 101, 99, 100.5, 254_321)]
+    # Same (now-closed) bucket_start, but Schwab now reports the fully-settled
+    # volume for that exact same 5-minute window.
+    bars = _with_forming_tail(HistoricalBar("AAPL", BUCKET_START, 100, 101, 99, 100.5, 254_321))
     await scheduler.run_poll_cycle(broker=broker, llm_client=llm, settings=settings, now=MID_WINDOW)
 
     assert await _bucket_count("AAPL") == 1  # still one row, not a duplicate
@@ -248,8 +274,8 @@ async def test_run_poll_cycle_fetches_market_context_once_and_threads_it_in(
         key = (ticker, span)
         call_counts[key] = call_counts.get(key, 0) + 1
         if ticker == "SPY":
-            return [spy_bar]
-        return [HistoricalBar(ticker, BUCKET_START, 100, 101, 99, 100.5, 1_000)]
+            return _with_forming_tail(spy_bar)
+        return _with_forming_tail(HistoricalBar(ticker, BUCKET_START, 100, 101, 99, 100.5, 1_000))
 
     monkeypatch.setattr(scheduler.rh, "get_5min_historicals", fake_get_5min_historicals)
     monkeypatch.setattr(scheduler.rh, "get_quote", lambda ticker: None)
@@ -281,7 +307,7 @@ async def test_market_context_fetch_failure_degrades_gracefully(db_session, monk
     def fake_get_5min_historicals(ticker, span="day", bounds="regular"):
         if ticker == "SPY":
             raise RuntimeError("benchmark fetch failed")
-        return [aapl_bar]
+        return _with_forming_tail(aapl_bar)
 
     monkeypatch.setattr(scheduler.rh, "get_5min_historicals", fake_get_5min_historicals)
     monkeypatch.setattr(scheduler.rh, "get_quote", lambda ticker: None)
@@ -305,7 +331,7 @@ async def test_market_benchmark_ticker_empty_disables_market_context(db_session,
 
     def fake_get_5min_historicals(ticker, span="day", bounds="regular"):
         call_counts[ticker] = call_counts.get(ticker, 0) + 1
-        return [aapl_bar]
+        return _with_forming_tail(aapl_bar)
 
     monkeypatch.setattr(scheduler.rh, "get_5min_historicals", fake_get_5min_historicals)
     monkeypatch.setattr(scheduler.rh, "get_quote", lambda ticker: None)
@@ -385,7 +411,7 @@ async def test_float_shares_is_fetched_once_per_ticker_across_poll_cycles(db_ses
         # A distinct bucket_start per call so the second poll cycle isn't skipped
         # as "already recorded".
         start = BUCKET_START + timedelta(minutes=5 * (day_call_counts[ticker] - 1))
-        return [HistoricalBar(ticker, start, 100, 101, 99, 100.5, 1_000)]
+        return _with_forming_tail(HistoricalBar(ticker, start, 100, 101, 99, 100.5, 1_000))
 
     def fake_get_float_shares(ticker):
         float_call_counts[ticker] = float_call_counts.get(ticker, 0) + 1

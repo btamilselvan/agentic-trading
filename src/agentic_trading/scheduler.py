@@ -116,7 +116,10 @@ async def _get_market_context(settings: Settings) -> MarketContext | None:
             "Failed to fetch market context (%s) -- proceeding without it", benchmark
         )
         return None
-    return build_market_context(benchmark, bars_today, lookback)
+    # Same still-forming-tail-bar issue as _poll_ticker (see its comment) -- drop
+    # the last bar (the window that just started this instant, not yet closed)
+    # before computing change_pct/vwap_deviation_pct/range_pct from it.
+    return build_market_context(benchmark, bars_today[:-1], lookback)
 
 
 async def _realized_pnl_today_all_tickers(session, today) -> float:
@@ -453,9 +456,23 @@ async def _poll_ticker(
 
     # get 5 mins bars for today (begin time, open/close price, high/low and volume)
     bars = await asyncio.to_thread(mdc.get_5min_historicals, ticker, span="day")
-    if not bars:
+    # The poll cadence matches the bar interval (settings.poll_interval_minutes,
+    # CronTrigger(minute="*/5")), so this fires exactly on each 5-minute boundary --
+    # meaning bars[-1] is always the candle for the window that just started this
+    # instant, not one that's finished. Its volume/high/low only reflect whatever
+    # ticks have printed in the moment since the window opened (seen empirically:
+    # a bucket read ~7K volume at poll time vs. ~1.8M once that same window had
+    # actually closed), and since every later poll moves on to a newer bars[-1],
+    # that thin snapshot is never revisited or corrected. Only bars[:-1] are
+    # closed/final, so this cycle's bucket is the last CLOSED bar -- and VWAP/RSI
+    # must accumulate over closed bars only, never the still-forming tail. At the
+    # very first poll of the day nothing has closed yet (len(bars) < 2), so there's
+    # nothing to record this cycle -- the 09:30-09:35 bucket isn't knowable until
+    # the 09:35 poll, once that window has actually elapsed.
+    if len(bars) < 2:
         return
-    latest_bar = bars[-1]
+    closed_bars = bars[:-1]
+    latest_bar = closed_bars[-1]
 
     #get current quote (bid/ask price + size)
     quote = await asyncio.to_thread(mdc.get_quote, ticker)
@@ -463,10 +480,11 @@ async def _poll_ticker(
     #get the bars for the last one week
     lookback = await _get_lookback_bars(ticker)
 
-    #current metric bucket with RVOL + session VWAP + RSI (today_bars=bars gives
-    #VWAP/RSI the full open-through-now series they need to accumulate correctly)
+    #current metric bucket with RVOL + session VWAP + RSI (today_bars=closed_bars
+    #gives VWAP/RSI the full open-through-now series of CLOSED bars they need to
+    #accumulate correctly, excluding the still-forming tail bar)
     bucket_data = build_bucket(
-        latest_bar, quote, lookback, today_bars=bars, rsi_period=settings.rsi_period
+        latest_bar, quote, lookback, today_bars=closed_bars, rsi_period=settings.rsi_period
     )
     today = bucket_data.bucket_start.date()
 

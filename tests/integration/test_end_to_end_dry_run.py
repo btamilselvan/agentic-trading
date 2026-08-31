@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import json
 import threading
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -152,9 +152,20 @@ async def test_full_dry_run_cycle_over_real_http_llm_and_webhook(
     # everything downstream of this is the real code path.
     bucket_start = datetime(2026, 8, 17, 9, 30, tzinfo=UTC)
     bar = HistoricalBar(TICKER, bucket_start, 100, 101, 99, 100.5, 10_000)
+    # scheduler._poll_ticker now treats the LAST bar of a "day"-span fetch as the
+    # live candle for the window that just started this instant and drops it --
+    # only bars[:-1] are closed/final (see scheduler.py's comment). A synthetic
+    # still-forming tail bar 5 minutes later is needed so `bar` itself is the one
+    # actually recorded/evaluated this cycle rather than being discarded as "not
+    # closed yet". The tail's own OHLCV is irrelevant -- never read here.
+    forming_tail = HistoricalBar(
+        TICKER, bucket_start + timedelta(minutes=5), 100.5, 100.5, 100.5, 100.5, 0
+    )
     quote = Quote(TICKER, 100.4, 100.6, 500, 400, 100.5, None)
     monkeypatch.setattr(
-        scheduler.rh, "get_5min_historicals", lambda ticker, span="day", bounds="regular": [bar]
+        scheduler.rh,
+        "get_5min_historicals",
+        lambda ticker, span="day", bounds="regular": [bar, forming_tail],
     )
     monkeypatch.setattr(scheduler.rh, "get_quote", lambda ticker: quote)
     scheduler._rvol_lookback_cache.clear()
