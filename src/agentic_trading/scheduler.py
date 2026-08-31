@@ -477,8 +477,33 @@ async def _poll_ticker(
         already_recorded = await repo.get_buckets_for_ticker(
             session, ticker, since=bucket_data.bucket_start
         )
-        if any(b.bucket_start == bucket_data.bucket_start for b in already_recorded):
-            return  # already polled this 5-minute bucket
+        existing_bucket = next(
+            (b for b in already_recorded if b.bucket_start == bucket_data.bucket_start), None
+        )
+        if existing_bucket is not None:
+            # This 5-minute bucket was already fully processed (LLM decision made,
+            # possibly a trade opened) in an earlier poll cycle -- never re-run that
+            # pipeline for it. But `bars` was just re-fetched fresh from
+            # market_data_client, so it may carry a more-settled OHLCV/volume read
+            # for this exact same window than what we saved last time (see
+            # repo.save_bucket's docstring); refresh the stored row in place rather
+            # than silently discarding that correction.
+            await repo.save_bucket(
+                session,
+                existing=existing_bucket,
+                open=bucket_data.open,
+                high=bucket_data.high,
+                low=bucket_data.low,
+                close=bucket_data.close,
+                volume=bucket_data.volume,
+                est_buy_volume=bucket_data.est_buy_volume,
+                est_sell_volume=bucket_data.est_sell_volume,
+                candle_body=bucket_data.candle_body,
+                upper_wick=bucket_data.upper_wick,
+                lower_wick=bucket_data.lower_wick,
+                rvol=bucket_data.rvol,
+            )
+            return
 
         bucket = await repo.save_bucket(
             session,

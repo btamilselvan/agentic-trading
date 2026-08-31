@@ -201,6 +201,43 @@ async def test_poll_cycle_persists_bucket_and_skips_reprocessing_same_bucket(
     assert llm.calls == 1  # second call was a no-op (bucket already recorded)
 
 
+async def test_poll_cycle_refreshes_volume_of_already_recorded_bucket(db_session, monkeypatch):
+    """Schwab (and to a lesser extent Robinhood) keeps settling a same-day candle's
+    volume for a short while after it first appears -- if a later poll re-fetches
+    the exact same bucket_start with a fuller/more-settled volume reading, that
+    should correct the already-saved row in place rather than being silently
+    discarded by the "already polled this bucket" dedup check.
+    """
+    bars = [HistoricalBar("AAPL", BUCKET_START, 100, 101, 99, 100.5, 1000)]
+
+    def fake_get_5min_historicals(ticker, span="day", bounds="regular"):
+        return bars
+
+    monkeypatch.setattr(scheduler.rh, "get_5min_historicals", fake_get_5min_historicals)
+    monkeypatch.setattr(scheduler.rh, "get_quote", lambda ticker: None)
+    scheduler._rvol_lookback_cache.clear()
+    _patch_catalyst_context(monkeypatch)
+
+    llm = FakeLLMClient(_HOLD_DECISION)
+    broker = DryRunBrokerClient()
+    settings = _settings()
+
+    await scheduler.run_poll_cycle(broker=broker, llm_client=llm, settings=settings, now=MID_WINDOW)
+
+    # Same bucket_start, but Schwab now reports the fully-settled volume for that
+    # exact same 5-minute window.
+    bars = [HistoricalBar("AAPL", BUCKET_START, 100, 101, 99, 100.5, 254_321)]
+    await scheduler.run_poll_cycle(broker=broker, llm_client=llm, settings=settings, now=MID_WINDOW)
+
+    assert await _bucket_count("AAPL") == 1  # still one row, not a duplicate
+    assert llm.calls == 1  # no re-processing of an already-decided bucket
+    async with session_scope() as session:
+        rows = await repo.get_buckets_for_ticker(
+            session, "AAPL", since=datetime(2020, 1, 1, tzinfo=UTC)
+        )
+    assert rows[0].volume == 254_321  # refreshed in place, not left stale at 1000
+
+
 async def test_run_poll_cycle_fetches_market_context_once_and_threads_it_in(
     db_session, monkeypatch
 ):

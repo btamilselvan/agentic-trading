@@ -28,7 +28,25 @@ from agentic_trading.state.models import (
 # --- Buckets ----------------------------------------------------------------
 
 
-async def save_bucket(session: AsyncSession, **fields) -> Bucket:
+async def save_bucket(session: AsyncSession, *, existing: Bucket | None = None, **fields) -> Bucket:
+    """Insert a new bucket, or -- if `existing` (a previously-saved row for the same
+    `(ticker, bucket_start)`, per the `uq_bucket_ticker_start` constraint) is passed --
+    update it in place instead of inserting a duplicate.
+
+    Schwab (and to a lesser extent Robinhood) keeps settling a same-day candle's
+    volume for a short while after it first appears in a `pricehistory` response
+    (late/consolidated-tape prints), so a bucket polled right as it opens can read
+    thinner than the exact same 5-minute window reads a poll cycle later. Without
+    this, `scheduler.py`'s "already polled this bucket" dedup check would silently
+    discard that more-complete re-read forever; updating in place instead lets a
+    later, fuller read correct an earlier provisional one -- see scheduler.py's
+    `_poll_ticker` for the call site.
+    """
+    if existing is not None:
+        for key, value in fields.items():
+            setattr(existing, key, value)
+        await session.flush()
+        return existing
     bucket = Bucket(**fields)
     session.add(bucket)
     await session.flush()
