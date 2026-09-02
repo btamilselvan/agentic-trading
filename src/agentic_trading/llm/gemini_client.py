@@ -87,6 +87,24 @@ def _to_gemini_schema(schema: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def _build_response_schema() -> dict[str, Any]:
+    """TradeDecision's `pattern_reasoning` has a Python-side default (`= ""`) so
+    every OTHER provider's response still parses even when it's omitted -- but
+    that also means pydantic's own `required` list (which _to_gemini_schema just
+    passes through) doesn't include it, so Gemini's structured-output constraint
+    never actually forces a model to fill it in. Observed live: gemini's lighter/
+    cheaper flash-lite tier happily returns it blank once the schema allows that.
+    Force it into Gemini's required list regardless of what pydantic requires on
+    the way back in -- we still want every response to explain itself.
+    """
+    schema = _to_gemini_schema(TradeDecision.model_json_schema())
+    required = list(schema.get("required", []))
+    if "pattern_reasoning" not in required:
+        required.append("pattern_reasoning")
+    schema["required"] = required
+    return schema
+
+
 _UNSET: str | None = "__unset__"  # sentinel distinct from None, which is a valid api_key override
 
 
@@ -117,7 +135,7 @@ class GeminiClient:
 
         headers = {"x-goog-api-key": self.api_key} if self.api_key else {}
         url = f"{self.api_base}/v1beta/models/{self.model}:generateContent"
-        response_schema = _to_gemini_schema(TradeDecision.model_json_schema())
+        response_schema = _build_response_schema()
 
         last_error: Exception | None = None
         async with httpx.AsyncClient(timeout=self.timeout, headers=headers) as client:

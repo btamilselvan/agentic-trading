@@ -138,3 +138,9 @@ async def test_decide_sends_gemini_compatible_response_schema():
     # Optional numeric fields translated to nullable rather than a union type.
     assert schema["properties"]["buy_limit_price"]["nullable"] is True
     assert schema["properties"]["buy_limit_price"]["type"] == "number"
+    # pattern_reasoning has a Python-side default ("") for cross-provider parsing
+    # tolerance, so pydantic's own required list omits it -- but Gemini's request
+    # forces it anyway (observed live: flash-lite returns it blank/omitted
+    # otherwise). See gemini_client._build_response_schema.
+    assert "pattern_reasoning" in schema["required"]
+    assert "decision" in schema["required"]  # still there -- not replaced, only added to
