@@ -122,14 +122,11 @@ async def test_manual_order_entry_opens_a_trade_in_dry_run(monkeypatch, client):
 
         trades_resp = await client.get("/trades")
         trades = trades_resp.json()
-        # DryRunBrokerClient fills both legs instantly, so by the time we check,
-        # try_enter_position has already placed the paired sell and closed the
-        # trade -- this exercises that whole chain, not just the initial entry.
+        # DryRunBrokerClient fills the buy leg instantly, but the paired sell now
+        # rests at target_sell_price (mirrors LIVE -- see order_manager.py) rather
+        # than closing the round trip immediately, so the trade is still OPEN.
         assert any(
-            t["ticker"] == "AAPL"
-            and t["status"] == "CLOSED"
-            and t["entry_price"] == 100.0
-            and t["exit_price"] == 102.0
+            t["ticker"] == "AAPL" and t["status"] == "OPEN" and t["entry_price"] == 100.0
             for t in trades
         )
     finally:

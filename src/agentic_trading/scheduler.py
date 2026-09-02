@@ -775,11 +775,27 @@ async def run_order_management_sweep(
     retry_missing_paired_sells runs after poll_pending_buy_orders on every tick too
     -- covers a buy fill whose paired sell placement failed (see that function's
     docstring), so it doesn't sit unmanaged until EOD liquidation.
+
+    DryRunBrokerClient has no real market connection of its own (see its
+    docstring): a resting target/trailed-target SELL only "crosses" and fills once
+    fed a current price via `mark_price`. Feed it one, per ticker with an open
+    trade, before the fill-detection sweep below runs -- LIVE's McpBrokerClient has
+    no such method (real fills come from the real exchange), so this is a no-op
+    there via the isinstance guard.
     """
     settings = settings or get_settings()
     notifier = notifier or get_notifier()
     now = datetime.now(UTC)
     async with session_scope() as session:
+        if isinstance(broker, om.DryRunBrokerClient):
+            for trade in await repo.get_open_trades(session):
+                quote = await asyncio.to_thread(mdc.get_quote, trade.ticker)
+                if quote is None:
+                    continue
+                price = quote.last_trade_price or quote.bid_price
+                if price is not None:
+                    broker.mark_price(trade.ticker, price)
+
         await om.poll_pending_buy_orders(
             session,
             broker,

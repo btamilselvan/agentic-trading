@@ -438,7 +438,9 @@ async def test_float_shares_is_fetched_once_per_ticker_across_poll_cycles(db_ses
     assert float_call_counts["AAPL"] == 1
 
 
-async def test_poll_cycle_opens_and_closes_trade_on_high_confidence_buy(db_session, monkeypatch):
+async def test_poll_cycle_opens_trade_with_resting_sell_on_high_confidence_buy(
+    db_session, monkeypatch
+):
     bar = HistoricalBar("AAPL", BUCKET_START, 100, 101, 99, 100.5, 1000)
     quote = Quote("AAPL", 100.4, 100.6, 500, 400, 100.5, None)
     _patch_market_data(monkeypatch, bar, quote)
@@ -464,9 +466,16 @@ async def test_poll_cycle_opens_and_closes_trade_on_high_confidence_buy(db_sessi
         saved = result.scalars().one()
         assert saved.acted_on is True
 
+        # The buy fills instantly (DryRunBrokerClient's one remaining
+        # simplification), but the paired sell now mirrors LIVE -- it rests at
+        # target_sell_price until the market actually trades there, so the
+        # position is still open right after this cycle.
         daily_state = await repo.get_or_create_daily_state(session, "AAPL", TODAY)
-        assert daily_state.completed_trades_count == 1
-        assert daily_state.open_positions_count == 0
+        assert daily_state.completed_trades_count == 0
+        assert daily_state.open_positions_count == 1
+        trades = await repo.get_open_trades(session, ticker="AAPL")
+        assert len(trades) == 1
+        assert float(trades[0].target_sell_price) == 102.0
 
 
 class FakeNotifier:
@@ -479,8 +488,8 @@ class FakeNotifier:
 
 async def test_poll_cycle_paper_trades_exactly_like_dry_run(db_session, monkeypatch):
     """PAPER_TRADING runs the identical simulated order lifecycle DRY_RUN does --
-    real data/LLM in, simulated buy+sell fill out, real DB updates -- the only
-    difference is Order.mode is tagged PAPER_TRADING, not DRY_RUN, so paper-
+    real data/LLM in, simulated buy fill + resting sell out, real DB updates -- the
+    only difference is Order.mode is tagged PAPER_TRADING, not DRY_RUN, so paper-
     trading performance can be queried apart from ad hoc dev DRY_RUN runs.
     """
     bar = HistoricalBar("AAPL", BUCKET_START, 100, 101, 99, 100.5, 1000)
@@ -514,22 +523,42 @@ async def test_poll_cycle_paper_trades_exactly_like_dry_run(db_session, monkeypa
         assert saved.decision.value == "BUY"
         assert saved.acted_on is True  # simulated, but genuinely acted on
 
+        # Buy fills instantly; the paired sell rests at target_sell_price (mirrors
+        # LIVE) rather than closing the round trip within this same cycle.
         daily_state = await repo.get_or_create_daily_state(session, "AAPL", TODAY)
-        assert daily_state.completed_trades_count == 1
-        assert daily_state.open_positions_count == 0
+        assert daily_state.completed_trades_count == 0
+        assert daily_state.open_positions_count == 1
 
         orders = (
             await session.execute(select(Order).where(Order.ticker == "AAPL"))
         ).scalars().all()
-        assert len(orders) == 2  # buy + paired sell
+        assert len(orders) == 2  # buy (filled) + paired sell (pending)
         assert all(o.mode == TradingModeEnum.PAPER_TRADING for o in orders)
+        sell_order = next(o for o in orders if o.side == OrderSide.SELL)
+        assert sell_order.status == OrderStatus.PENDING
+        assert float(sell_order.limit_price) == 102.0
 
     titles = [title for title, _ in notifier.calls]
     assert "BUY signal" in titles
-    assert "Order filled" in titles
-    assert "Trade closed" in titles
+    assert "Order filled" in titles  # the buy leg
+    assert "Trade closed" not in titles  # sell hasn't filled yet
     buy_signal_fields = next(fields for title, fields in notifier.calls if title == "BUY signal")
     assert buy_signal_fields["mode"] == "PAPER_TRADING"
+
+    # Once the market trades up to target, the order-management sweep (which
+    # fetches its own fresh quote per open trade, same as run_eod_liquidation)
+    # detects the fill and closes the trade -- same path LIVE uses.
+    above_target_quote = Quote("AAPL", 102.0, 102.1, 500, 400, 102.0, None)
+    monkeypatch.setattr(scheduler.rh, "get_quote", lambda ticker: above_target_quote)
+    await scheduler.run_order_management_sweep(
+        broker=broker, settings=_settings(mode=TradingMode.PAPER_TRADING), notifier=notifier
+    )
+    async with session_scope() as session:
+        daily_state = await repo.get_or_create_daily_state(session, "AAPL", TODAY)
+        assert daily_state.completed_trades_count == 1
+        assert daily_state.open_positions_count == 0
+    titles = [title for title, _ in notifier.calls]
+    assert "Trade closed" in titles
 
 
 async def test_poll_cycle_skips_llm_when_ticker_already_has_open_position(db_session, monkeypatch):

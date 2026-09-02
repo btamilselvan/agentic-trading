@@ -93,7 +93,7 @@ async def _seed_decision(session, ticker="AAPL") -> int:
     return decision.id
 
 
-async def test_try_enter_position_opens_trade_and_fills_instantly_in_dry_run(db_session):
+async def test_try_enter_position_opens_trade_and_rests_paired_sell_in_dry_run(db_session):
     broker = om.DryRunBrokerClient()
     decision_id = await _seed_decision(db_session)
 
@@ -110,15 +110,28 @@ async def test_try_enter_position_opens_trade_and_fills_instantly_in_dry_run(db_
 
     assert outcome.opened
     trade = await db_session.get(Trade, outcome.trade_id)
-    # DryRunBrokerClient fills the buy instantly, which places+fills the paired sell
-    # instantly too -- so the trade should already be closed with realized PnL.
-    assert trade.status == TradeStatus.CLOSED
-    assert trade.exit_price == 102.0
-    assert float(trade.pnl) == pytest.approx((102.0 - 100.0) * float(trade.quantity))
+    # DryRunBrokerClient fills the buy instantly, but the paired sell now mirrors
+    # LIVE -- it rests until the market actually trades up to target_sell_price
+    # (see mark_price), so the trade should still be OPEN.
+    assert trade.status == TradeStatus.OPEN
+    sell_orders = await repo.get_open_orders(db_session, ticker="AAPL", side=OrderSide.SELL)
+    assert len(sell_orders) == 1
+    assert float(sell_orders[0].limit_price) == 102.0
 
     daily_state = await repo.get_or_create_daily_state(db_session, "AAPL", TODAY)
-    assert daily_state.completed_trades_count == 1
-    assert daily_state.open_positions_count == 0
+    assert daily_state.completed_trades_count == 0
+    assert daily_state.open_positions_count == 1
+
+    # Once the market trades up to (or through) the target, the resting sell
+    # fills and the trade closes -- same detection path as a real broker
+    # (poll_pending_sell_orders watching for a position-quantity decrease).
+    broker.mark_price("AAPL", 102.0)
+    await om.poll_pending_sell_orders(db_session, broker)
+
+    refreshed_trade = await db_session.get(Trade, outcome.trade_id)
+    assert refreshed_trade.status == TradeStatus.CLOSED
+    assert float(refreshed_trade.exit_price) == 102.0
+    assert float(refreshed_trade.pnl) == pytest.approx((102.0 - 100.0) * float(trade.quantity))
 
 
 async def test_try_enter_position_blocked_by_open_position_guardrail(db_session):
@@ -674,11 +687,23 @@ async def test_apply_trailing_stop_replaces_resting_sell_when_target_raised(db_s
 
     await om.apply_trailing_stop(db_session, broker, trade=trade, new_target=105.0, new_stop=99.0)
 
+    # The replacement is still a resting limit order at the new, higher target --
+    # it doesn't fill just because it was placed (mirrors _place_paired_sell, not
+    # a marketable exit), so it stays PENDING until price actually gets there.
     orders = await repo.get_open_orders(db_session, ticker="AAPL")
-    assert orders == []  # DryRunBrokerClient fills the replacement instantly
-    assert trade.status == TradeStatus.CLOSED  # filled at the new, higher target
-    assert float(trade.exit_price) == 105.0
-    assert trade.exit_reason == "TARGET_HIT"
+    assert len(orders) == 1
+    assert float(orders[0].limit_price) == 105.0
+    assert trade.status == TradeStatus.OPEN
+    refreshed_trade = await db_session.get(Trade, trade.id)
+    assert float(refreshed_trade.target_sell_price) == 105.0
+
+    # Once price actually reaches the trailed target, it fills like any other
+    # resting sell.
+    broker.mark_price("AAPL", 105.0)
+    await om.poll_pending_sell_orders(db_session, broker)
+    refreshed_trade = await db_session.get(Trade, trade.id)
+    assert refreshed_trade.status == TradeStatus.CLOSED
+    assert float(refreshed_trade.exit_price) == 105.0
 
 
 async def test_apply_trailing_stop_leaves_resting_order_untouched_when_target_not_raised(

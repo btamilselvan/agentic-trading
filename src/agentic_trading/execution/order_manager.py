@@ -41,16 +41,37 @@ logger = logging.getLogger(__name__)
 _NULL_NOTIFIER = NullNotifier()
 
 
+@dataclass
+class _PendingSell:
+    broker_order_id: str
+    quantity: float
+    limit_price: float
+
+
 class DryRunBrokerClient:
-    """BrokerExecutionClient for MODE=DRY_RUN -- simulates fills instantly at the
-    requested limit price and tracks open quantity in-memory. Exercises the exact
-    same order_manager state machine and DB writes as LIVE, just with zero network
-    calls to the MCP and zero real money at risk.
+    """BrokerExecutionClient for MODE=DRY_RUN/PAPER_TRADING -- tracks open quantity
+    in-memory, exercising the exact same order_manager state machine and DB writes
+    as LIVE, just with zero network calls to the MCP and zero real money at risk.
+
+    BUY orders are a deliberate simplification and still fill instantly at the
+    requested limit price -- entries are assumed marketable. SELL orders are NOT:
+    they behave like a real resting limit order at the exchange (matching
+    McpBrokerClient/LIVE -- see broker_mcp_client.py's module docstring: "real
+    orders fill asynchronously, unlike DryRunBrokerClient's instant simulated
+    fill"), staying PENDING until `mark_price` reports the market has traded at or
+    above the limit. That covers the target sell and a trailed-up target
+    (order_manager._place_paired_sell / apply_trailing_stop) resting untouched
+    until price actually gets there. A SELL only fills immediately when it's
+    already marketable at the time it's placed -- true for the early-exit/EOD
+    liquidation paths, which call `_mark_price` with their own exit price right
+    before placing (see try_exit_position_early / liquidate_all_open_positions).
     """
 
     def __init__(self) -> None:
         self._positions: dict[str, float] = {}
         self._next_order_id = 1
+        self._last_price: dict[str, float] = {}
+        self._pending_sells: dict[str, list[_PendingSell]] = {}
 
     async def get_open_position_quantity(self, ticker: str) -> float:
         return self._positions.get(ticker, 0.0)
@@ -65,12 +86,56 @@ class DryRunBrokerClient:
     ) -> PlacedOrder:
         order_id = f"DRYRUN-{self._next_order_id}"
         self._next_order_id += 1
-        delta = quantity if side == "buy" else -quantity
-        self._positions[ticker] = self._positions.get(ticker, 0.0) + delta
-        return PlacedOrder(broker_order_id=order_id, status="filled", fill_price=limit_price)
+        if side == "buy":
+            self._positions[ticker] = self._positions.get(ticker, 0.0) + quantity
+            return PlacedOrder(broker_order_id=order_id, status="filled", fill_price=limit_price)
+
+        current_price = self._last_price.get(ticker)
+        if current_price is not None and current_price >= limit_price:
+            self._positions[ticker] = self._positions.get(ticker, 0.0) - quantity
+            return PlacedOrder(broker_order_id=order_id, status="filled", fill_price=limit_price)
+
+        self._pending_sells.setdefault(ticker, []).append(
+            _PendingSell(broker_order_id=order_id, quantity=quantity, limit_price=limit_price)
+        )
+        return PlacedOrder(broker_order_id=order_id, status="pending", fill_price=None)
 
     async def cancel_order(self, broker_order_id: str) -> None:
-        return None
+        for pending in self._pending_sells.values():
+            pending[:] = [o for o in pending if o.broker_order_id != broker_order_id]
+
+    def mark_price(self, ticker: str, price: float) -> None:
+        """Feed the latest known market price for `ticker` -- the simulator has no
+        real market connection of its own, so this is what lets a resting SELL
+        order "cross" and fill, the same way a real limit order at the exchange
+        would as the market trades through it. Called by
+        scheduler.run_order_management_sweep once per tick for every ticker with an
+        open trade, using a real quote -- see that function's docstring.
+        """
+        self._last_price[ticker] = price
+        pending = self._pending_sells.get(ticker)
+        if not pending:
+            return
+        still_pending = []
+        for order in pending:
+            if price >= order.limit_price:
+                self._positions[ticker] = self._positions.get(ticker, 0.0) - order.quantity
+            else:
+                still_pending.append(order)
+        self._pending_sells[ticker] = still_pending
+
+
+def _mark_price(broker: BrokerExecutionClient, ticker: str, price: float) -> None:
+    """Best-effort DryRunBrokerClient.mark_price call, made just before placing a
+    marketable exit order (early exit / EOD liquidation) so it fills immediately
+    the same way a real marketable order would -- without depending on whether the
+    periodic order-management sweep has already primed a price for this ticker
+    this tick. A no-op for any broker without `mark_price` (e.g. the real
+    McpBrokerClient -- the exchange handles this itself, nothing to simulate).
+    """
+    mark_price = getattr(broker, "mark_price", None)
+    if mark_price is not None:
+        mark_price(ticker, price)
 
 
 def compute_order_quantity(limit_price: float, max_capital_per_trade_usd: float) -> float:
@@ -357,6 +422,7 @@ async def try_exit_position_early(
         exit_reason,
         exit_price,
     )
+    _mark_price(broker, trade.ticker, exit_price)
     placed = await broker.place_order(
         ticker=trade.ticker, side="sell", quantity=position_qty, limit_price=exit_price
     )
@@ -618,6 +684,7 @@ async def liquidate_all_open_positions(
                     trade.ticker,
                 )
                 continue
+            _mark_price(broker, trade.ticker, price)
             placed = await broker.place_order(
                 ticker=trade.ticker, side="sell", quantity=position_qty, limit_price=price
             )

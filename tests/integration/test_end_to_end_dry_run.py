@@ -203,39 +203,54 @@ async def test_full_dry_run_cycle_over_real_http_llm_and_webhook(
         assert saved.acted_on is True
         assert "breakout" in saved.pattern_reasoning
 
-    # 2. DryRunBrokerClient filled the buy instantly, which placed+filled the paired
-    #    sell instantly too -- the trade should be closed with realized PnL, and the
-    #    ticker's daily state reflects a completed round trip.
+    # 2. DryRunBrokerClient filled the buy instantly, but the paired sell now
+    #    mirrors LIVE -- it rests at target_sell_price (102.0, from the fake
+    #    Ollama server's fixed decision above) rather than closing the round trip
+    #    within this same cycle, so the position is still open.
     async with session_scope() as session:
         daily_state = await repo.get_or_create_daily_state(session, TICKER, date(2026, 8, 17))
-        assert daily_state.completed_trades_count == 1
-        assert daily_state.open_positions_count == 0
+        assert daily_state.completed_trades_count == 0
+        assert daily_state.open_positions_count == 1
         trades = await repo.get_open_trades(session, ticker=TICKER)
-        assert trades == []
+        assert len(trades) == 1
+        assert float(trades[0].target_sell_price) == 102.0
 
     # 3. Real webhook POSTs actually reached the fake receiver over HTTP.
     texts = "\n---\n".join(item["text"] for item in fake_webhook_server)
     assert "BUY signal" in texts
-    assert "Order filled" in texts
+    assert "Order filled" in texts  # the buy leg
+    assert "Trade closed" not in texts  # sell hasn't filled yet
+
+    # 4. Once the market actually trades up to the resting target, the
+    #    order-management sweep (fetching its own fresh quote, same as
+    #    run_eod_liquidation below) detects the fill and closes the trade -- same
+    #    path LIVE uses.
+    above_target_quote = Quote(TICKER, 102.0, 102.1, 500, 400, 102.0, None)
+    monkeypatch.setattr(scheduler.rh, "get_quote", lambda ticker: above_target_quote)
+    await scheduler.run_order_management_sweep(broker=broker, settings=settings, notifier=notifier)
+
+    async with session_scope() as session:
+        assert (await repo.get_open_trades(session, ticker=TICKER)) == []
+        daily_state = await repo.get_or_create_daily_state(session, TICKER, date(2026, 8, 17))
+        assert daily_state.completed_trades_count == 1
+
+    texts = "\n---\n".join(item["text"] for item in fake_webhook_server)
     assert "Trade closed" in texts
 
-    # 4. Order-management sweep and EOD liquidation both run cleanly against this
-    #    already-closed state with zero pending orders/open trades left to act on.
-    await scheduler.run_order_management_sweep(broker=broker, settings=settings, notifier=notifier)
+    # 5. EOD liquidation runs cleanly against this already-closed state with zero
+    #    pending orders/open trades left to act on.
     monkeypatch.setattr(scheduler.rh, "get_quote", lambda ticker: quote)
     await scheduler.run_eod_liquidation(broker=broker, settings=settings, notifier=notifier)
 
     async with session_scope() as session:
         assert (await repo.get_open_trades(session, ticker=TICKER)) == []
 
-    # 5. Phase 3: the ticker's continuity state round-tripped through a real Redis
-    #    too, not a fake -- DryRunBrokerClient filled both legs instantly within
-    #    this one cycle, so by the time _record_entry_decision ran the position
-    #    was already closed again (status HOLD, not IN_POSITION -- see
-    #    scheduler._poll_ticker's re-check comment), but the decision still landed
-    #    in the ticker's history for next cycle's continuity/hysteresis context.
+    # 6. Phase 3: the ticker's continuity state round-tripped through a real Redis
+    #    too, not a fake -- the position was still open (IN_POSITION) by the time
+    #    _record_entry_decision ran this cycle, and the decision landed in the
+    #    ticker's history for next cycle's continuity/hysteresis context.
     ticker_state = await get_ticker_state_store().get(TICKER, TRADE_DATE)
     assert ticker_state is not None
-    assert ticker_state.status == "HOLD"
+    assert ticker_state.status == "IN_POSITION"
     assert len(ticker_state.decision_history) == 1
     assert ticker_state.decision_history[0].decision == "BUY"
