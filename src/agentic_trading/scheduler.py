@@ -782,6 +782,15 @@ async def run_order_management_sweep(
     trade, before the fill-detection sweep below runs -- LIVE's McpBrokerClient has
     no such method (real fills come from the real exchange), so this is a no-op
     there via the isinstance guard.
+
+    That price is the current bid, not last_trade_price -- same convention as
+    every other exit price in this codebase (_exit_price_from_quote, and
+    run_eod_liquidation's liquidation_prices below). A resting sell fills against
+    the bid, not against whoever printed last; last_trade_price is a single,
+    noisier tape print (observed live: it can read well above the bid/ask and
+    above anything the same-minute 5-min bar's own high shows, falsely crossing a
+    resting target that was never actually reached) -- so it's only a fallback
+    when a quote has no bid at all.
     """
     settings = settings or get_settings()
     notifier = notifier or get_notifier()
@@ -792,8 +801,15 @@ async def run_order_management_sweep(
                 quote = await asyncio.to_thread(mdc.get_quote, trade.ticker)
                 if quote is None:
                     continue
-                price = quote.last_trade_price or quote.bid_price
+                price = quote.bid_price if quote.bid_price is not None else quote.last_trade_price
                 if price is not None:
+                    logger.debug(
+                        "mark_price %s @ %s (bid=%s last=%s)",
+                        trade.ticker,
+                        price,
+                        quote.bid_price,
+                        quote.last_trade_price,
+                    )
                     broker.mark_price(trade.ticker, price)
 
         await om.poll_pending_buy_orders(

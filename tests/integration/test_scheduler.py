@@ -618,6 +618,35 @@ async def test_order_management_sweep_cancels_timed_out_orders(db_session):
     assert "STALE-1" in broker.cancelled
 
 
+async def test_order_management_sweep_uses_bid_not_last_trade_price_to_mark_fills(
+    db_session, monkeypatch
+):
+    # Regression test: a resting sell must only cross on the bid (what it would
+    # actually fill against), not last_trade_price -- a single, noisier tape print
+    # that can read above the bid/ask (observed live) and falsely close a trade
+    # that never actually reached its target.
+    async with session_scope() as session:
+        await _seed_open_trade(session, entry_price=100.0, target_sell_price=105.0)
+    monkeypatch.setattr(
+        scheduler.rh,
+        "get_quote",
+        # bid/ask still well below target; a stray last_trade_price print above it.
+        lambda ticker: Quote(ticker, 101.0, 101.2, 500, 500, 106.0, None),
+    )
+    broker = DryRunBrokerClient()
+    broker._positions["AAPL"] = 5  # noqa: SLF001 -- test seeding an open position directly
+    # Register the resting sell inside the broker's own pending-order tracking too
+    # (mirrors what _place_paired_sell does at real entry) -- mark_price only
+    # re-checks orders it already knows about.
+    await broker.place_order(ticker="AAPL", side="sell", quantity=5, limit_price=105.0)
+
+    await scheduler.run_order_management_sweep(broker=broker, settings=_settings())
+
+    async with session_scope() as session:
+        trades = await repo.get_open_trades(session, ticker="AAPL")
+        assert len(trades) == 1  # untouched -- the bid never reached the 105.0 target
+
+
 async def test_eod_liquidation_closes_open_trade_at_quoted_bid(db_session, monkeypatch):
     monkeypatch.setattr(
         scheduler.rh, "get_quote", lambda ticker: Quote(ticker, 99.5, 99.7, 100, 100, 99.6, None)
