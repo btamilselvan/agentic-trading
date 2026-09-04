@@ -17,16 +17,10 @@ from agentic_trading.config import TradingMode, get_settings
 from agentic_trading.execution.broker_mcp_client import BrokerExecutionClient, McpBrokerClient
 from agentic_trading.execution.order_manager import DryRunBrokerClient
 from agentic_trading.llm.base import get_llm_client
+from agentic_trading.logging_config import configure_logging
 from agentic_trading.scheduler import build_scheduler
 
-logging.basicConfig(
-    level=logging.INFO,
-    # include thread id
-    format="%(asctime)s [%(levelname)s] [%(filename)s %(lineno)d] [Thread-%(thread)d] %(message)s",
-    handlers=[
-        logging.StreamHandler()  # log to console
-    ]
-)
+configure_logging()
 logger = logging.getLogger(__name__)
 
 
