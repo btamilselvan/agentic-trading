@@ -6,10 +6,10 @@ noise -- most visibly httpx's `logging.getLogger("httpx")` in `_client.py`, whic
 logs one line per HTTP request/response. That's useful for debugging but drowns out
 this project's own log lines in the console during normal operation.
 
-Split the two: everything (our logs + all third-party noise) goes to a rotating file
-under LOG_DIR so it's still available if something needs debugging, while the console
-only shows records from loggers under the `agentic_trading` package -- i.e. the lines
-this codebase actually emits.
+Split the two: everything (our logs + all third-party noise), DEBUG and up, goes to a
+rotating file under LOG_DIR so it's still available if something needs debugging,
+while the console only shows INFO-and-up records from loggers under the
+`agentic_trading` package -- i.e. the lines this codebase actually emits.
 """
 
 from __future__ import annotations
@@ -45,16 +45,20 @@ def configure_logging() -> None:
     formatter = logging.Formatter(LOG_FORMAT)
 
     root = logging.getLogger()
-    root.setLevel(logging.INFO)
+    # DEBUG here, not INFO -- the level filtering actually happens per-handler below.
+    # A root level of INFO would drop DEBUG records before they ever reach a handler.
+    root.setLevel(logging.DEBUG)
     root.handlers.clear()
 
     file_handler = logging.handlers.RotatingFileHandler(
         log_dir / "app.log", maxBytes=10_000_000, backupCount=5
     )
+    file_handler.setLevel(logging.DEBUG)
     file_handler.setFormatter(formatter)
     root.addHandler(file_handler)
 
     console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.INFO)
     console_handler.setFormatter(formatter)
     console_handler.addFilter(_AppOnlyFilter())
     root.addHandler(console_handler)
