@@ -125,6 +125,48 @@ async def test_decide_strips_markdown_fence_around_json():
 
 @pytest.mark.asyncio
 @respx.mock
+async def test_decide_logs_cache_usage_from_response(caplog):
+    respx.post(_URL).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "candidates": [
+                    {"content": {"role": "model", "parts": [{"text": _VALID_DECISION_JSON}]}}
+                ],
+                "usageMetadata": {
+                    "promptTokenCount": 2300,
+                    "cachedContentTokenCount": 2258,
+                    "totalTokenCount": 2400,
+                },
+            },
+        )
+    )
+    client = GeminiClient(model="gemini-3.6-flash", api_key=None, api_base="http://gemini.local")
+
+    with caplog.at_level("INFO", logger="agentic_trading.llm.gemini_client"):
+        await client.decide("AAPL", [], TickerState(0, 0, 0.0))
+
+    assert any(
+        "cached=2258/2300" in record.message for record in caplog.records
+    ), caplog.text
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_decide_logs_cache_usage_gracefully_when_usage_metadata_absent(caplog):
+    # e.g. an older/mocked backend that doesn't send usageMetadata at all -- should
+    # log a fallback line rather than raise (see gemini_client._log_cache_usage).
+    respx.post(_URL).mock(return_value=_generate_response(_VALID_DECISION_JSON))
+    client = GeminiClient(model="gemini-3.6-flash", api_key=None, api_base="http://gemini.local")
+
+    with caplog.at_level("INFO", logger="agentic_trading.llm.gemini_client"):
+        await client.decide("AAPL", [], TickerState(0, 0, 0.0))
+
+    assert any("no usageMetadata" in record.message for record in caplog.records), caplog.text
+
+
+@pytest.mark.asyncio
+@respx.mock
 async def test_decide_sends_gemini_compatible_response_schema():
     route = respx.post(_URL).mock(return_value=_generate_response(_VALID_DECISION_JSON))
     client = GeminiClient(model="gemini-3.6-flash", api_key=None, api_base="http://gemini.local")

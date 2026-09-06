@@ -105,6 +105,33 @@ def _build_response_schema() -> dict[str, Any]:
     return schema
 
 
+def _log_cache_usage(ticker: str, usage_metadata: dict[str, Any]) -> None:
+    """Logs Gemini's implicit-caching signal from `usageMetadata.cachedContentTokenCount`
+    (see https://ai.google.dev/api/generate-content) -- "number of tokens in the cached
+    part of the prompt". Implicit caching is automatic on Gemini 2.5+ (no cachedContent
+    resource on our side to manage), so this is purely an observability read: it lets us
+    confirm from real traffic whether the static `_SYSTEM_INSTRUCTIONS` prefix in
+    llm/prompt.py is actually landing in cache (it needs to clear a per-model minimum
+    prefix-token threshold, e.g. 2048 tokens on 2.5 Flash/Pro, which it only clears by a
+    small margin) rather than assuming so from prompt shape alone. Absent entirely if the
+    API omits usageMetadata, so all lookups default rather than raise.
+    """
+    prompt_tokens = usage_metadata.get("promptTokenCount")
+    cached_tokens = usage_metadata.get("cachedContentTokenCount", 0)
+    if prompt_tokens:
+        hit_pct = cached_tokens / prompt_tokens * 100
+        logger.info(
+            "Gemini cache usage for %s: cached=%d/%d prompt tokens (%.0f%%), total=%s",
+            ticker,
+            cached_tokens,
+            prompt_tokens,
+            hit_pct,
+            usage_metadata.get("totalTokenCount"),
+        )
+    else:
+        logger.info("Gemini cache usage for %s: no usageMetadata in response", ticker)
+
+
 _UNSET: str | None = "__unset__"  # sentinel distinct from None, which is a valid api_key override
 
 
@@ -155,6 +182,7 @@ class GeminiClient:
                     )
                     response.raise_for_status()
                     body = response.json()
+                    _log_cache_usage(ticker, body.get("usageMetadata", {}))
                     raw_text = body["candidates"][0]["content"]["parts"][0]["text"]
                     decision = TradeDecision.model_validate_json(strip_markdown_fence(raw_text))
                     return decision, prompt, raw_text
