@@ -6,8 +6,11 @@ pattern decisions, and executes paired buy→sell limit orders within a set of h
 entering and exiting positions within the same trading session only.
 
 See [`requirements.md`](requirements.md) for the full product spec, [`CLAUDE.md`](CLAUDE.md) for an
-architecture tour of the codebase, and [`docs/architecture.html`](docs/architecture.html) for system,
-component, logical, and deployment architecture diagrams.
+architecture tour of the codebase, [`docs/architecture.html`](docs/architecture.html) for system,
+component, logical, and deployment architecture diagrams, and
+[`docs/workflow.md`](docs/workflow.md) for a runtime walkthrough — metric capture → LLM decision → order
+placement → exit/liquidation — with Mermaid diagrams, the best starting point if you're integrating with
+or extending this project.
 
 > ⚠️ **This system places real orders with real money when `MODE=LIVE`.** Always validate a change in
 > `MODE=DRY_RUN` first (the default). See [Going live](#going-live) before ever flipping the switch.
